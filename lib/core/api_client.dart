@@ -1,4 +1,5 @@
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'constants.dart';
@@ -41,6 +42,10 @@ class RetryInterceptor extends Interceptor {
     }
 
     final delay = Duration(seconds: _retryAfterSeconds(err, attempt));
+    // Temporary: confirm retries in Flutter debug console.
+    debugPrint(
+      '[ApiClient] Retrying attempt ${attempt + 1} after ${delay.inSeconds}s...',
+    );
     await Future<void>.delayed(delay);
 
     final options = err.requestOptions;
