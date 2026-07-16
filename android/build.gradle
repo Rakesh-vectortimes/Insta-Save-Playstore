@@ -1,0 +1,28 @@
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+rootProject.buildDir = "../build"
+subprojects {
+    project.buildDir = "${rootProject.buildDir}/${project.name}"
+}
+subprojects {
+    project.evaluationDependsOn(":app")
+}
+
+// Legacy Flutter Gradle plugin compatibility for third-party Android plugins.
+subprojects { subproject ->
+    subproject.ext.flutter = [
+        compileSdkVersion: 35,
+        minSdkVersion: 24,
+        targetSdkVersion: 35,
+        ndkVersion: "25.1.8937393",
+    ]
+}
+
+tasks.register("clean", Delete) {
+    delete rootProject.buildDir
+}
