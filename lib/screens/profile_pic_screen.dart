@@ -72,26 +72,38 @@ class _ProfilePicScreenState extends ConsumerState<ProfilePicScreen> {
 
   Future<void> _download() async {
     final profile = _profile;
-    if (profile == null || profile.dpUrl.isEmpty) return;
+    if (profile == null || profile.username.isEmpty) return;
 
     setState(() => _isDownloading = true);
     final progressNotifier = ValueNotifier<FileDownloadProgress?>(null);
+    final progressMessage = profile.upscaleAvailable
+        ? 'Fetching HD profile picture...'
+        : 'Downloading profile picture...';
 
     if (mounted) {
-      DownloadProgressDialog.show(context, progressNotifier: progressNotifier);
+      DownloadProgressDialog.show(
+        context,
+        progressNotifier: progressNotifier,
+        message: progressMessage,
+      );
     }
 
     try {
+      final api = ref.read(instagramApiServiceProvider);
+      final download = await api.downloadProfilePicture(
+        profile.username,
+        onProgress: (p) => progressNotifier.value = p,
+      );
+
       final fileName = _downloadService.buildFileName(
-        prefix: 'instasave_${profile.username}',
+        prefix: 'instasave_${profile.username}_dp${download.wasUpscaled ? '_hd' : ''}',
         ext: 'jpg',
       );
 
-      final result = await _downloadService.downloadAndSave(
-        url: profile.dpUrl,
+      final result = await _downloadService.saveBytes(
+        bytes: download.bytes,
         fileName: fileName,
         saveType: MediaSaveType.image,
-        onProgress: (p) => progressNotifier.value = p,
       );
 
       final historyItem = DownloadItem(
@@ -101,7 +113,7 @@ class _ProfilePicScreenState extends ConsumerState<ProfilePicScreen> {
         thumbnailUrl: profile.dpUrl,
         sourceUrl: 'https://www.instagram.com/${profile.username}/',
         type: DownloadMediaType.photo,
-        quality: 'HD',
+        quality: download.wasUpscaled ? 'Upscaled' : 'HD',
         fileSizeBytes: result.fileSizeBytes,
         downloadedAt: DateTime.now(),
         author: profile.username,
@@ -112,7 +124,20 @@ class _ProfilePicScreenState extends ConsumerState<ProfilePicScreen> {
       if (mounted) {
         Navigator.of(context).pop();
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Profile picture saved!')),
+          SnackBar(
+            content: Text(
+              download.wasUpscaled
+                  ? 'HD profile picture saved!'
+                  : 'Profile picture saved!',
+            ),
+          ),
+        );
+      }
+    } on ApiException catch (e) {
+      if (mounted) {
+        Navigator.of(context).pop();
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(e.message)),
         );
       }
     } catch (e) {
@@ -221,10 +246,44 @@ class _ProfilePicScreenState extends ConsumerState<ProfilePicScreen> {
                       ],
                     ),
                   ),
+                if (_profile!.upscaleNote != null && _profile!.lowQuality)
+                  Container(
+                    margin: const EdgeInsets.only(bottom: 16),
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: AppColors.darkSurface,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: AppColors.darkBorder),
+                    ),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Icon(
+                          Icons.hd_outlined,
+                          color: AppColors.primary,
+                          size: 20,
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Text(
+                            _profile!.upscaleNote!,
+                            style: const TextStyle(
+                              color: AppColors.textSecondary,
+                              fontSize: 13,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
                 ElevatedButton.icon(
                   onPressed: _isDownloading ? null : _download,
                   icon: const Icon(Icons.download_rounded),
-                  label: const Text('Download profile picture'),
+                  label: Text(
+                    _profile!.upscaleAvailable
+                        ? 'Download HD profile picture'
+                        : 'Download profile picture',
+                  ),
                 ),
               ],
             ],
@@ -256,7 +315,7 @@ class _ProfileCard extends StatelessWidget {
               backgroundColor: Colors.grey.shade200,
               child: ClipOval(
                 child: CachedNetworkImage(
-                  imageUrl: profile.dpUrl,
+                  imageUrl: resolveApiUrl(profile.dpUrl),
                   width: 112,
                   height: 112,
                   fit: BoxFit.cover,

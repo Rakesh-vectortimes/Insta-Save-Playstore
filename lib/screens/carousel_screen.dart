@@ -32,52 +32,59 @@ class _CarouselScreenState extends ConsumerState<CarouselScreen> {
   String? _errorMessage;
   bool _scopeLimited = false;
   bool _retryable = false;
+  bool _isBusy = false;
+
+  Future<DownloadResult> _saveItem(
+    CarouselItem item, {
+    void Function(FileDownloadProgress progress)? onProgress,
+  }) async {
+    final saveType = item.isVideo ? MediaSaveType.video : MediaSaveType.image;
+    final fileName = _downloadService.buildFileName(
+      prefix: 'instasave_carousel',
+      ext: item.ext,
+      index: item.index,
+    );
+
+    final result = await _downloadService.downloadAndSave(
+      url: item.url,
+      fileName: fileName,
+      saveType: saveType,
+      onProgress: onProgress,
+    );
+
+    final historyItem = DownloadItem(
+      id: DateTime.now().millisecondsSinceEpoch.toString(),
+      fileName: result.savedPath.split('/').last,
+      localPath: result.savedPath,
+      thumbnailUrl: item.thumbnail ?? item.url,
+      sourceUrl: widget.postUrl,
+      type: item.isVideo ? DownloadMediaType.video : DownloadMediaType.photo,
+      quality: 'HD',
+      fileSizeBytes: result.fileSizeBytes,
+      downloadedAt: DateTime.now(),
+      author: widget.post.author,
+      title: widget.post.title,
+    );
+    await ref.read(downloadHistoryProvider.notifier).add(historyItem);
+    return result;
+  }
 
   Future<void> _downloadItem(int index) async {
+    if (_isBusy) return;
     final item = widget.post.items.firstWhere((i) => i.index == index);
     final progressNotifier = ValueNotifier<FileDownloadProgress?>(null);
 
+    setState(() => _isBusy = true);
     if (mounted) {
       DownloadProgressDialog.show(context, progressNotifier: progressNotifier);
     }
 
     try {
-      final saveType = item.isVideo
-          ? MediaSaveType.video
-          : MediaSaveType.image;
-
-      final fileName = _downloadService.buildFileName(
-        prefix: 'instasave_carousel',
-        ext: item.ext,
-        index: item.index,
-      );
-
-      final result = await _downloadService.downloadAndSave(
-        url: item.url,
-        fileName: fileName,
-        saveType: saveType,
-        onProgress: (p) => progressNotifier.value = p,
-      );
-
-      final historyItem = DownloadItem(
-        id: DateTime.now().millisecondsSinceEpoch.toString(),
-        fileName: result.savedPath.split('/').last,
-        localPath: result.savedPath,
-        thumbnailUrl: item.thumbnail ?? item.url,
-        sourceUrl: widget.postUrl,
-        type: item.isVideo ? DownloadMediaType.video : DownloadMediaType.photo,
-        quality: 'HD',
-        fileSizeBytes: result.fileSizeBytes,
-        downloadedAt: DateTime.now(),
-        author: widget.post.author,
-        title: widget.post.title,
-      );
-      await ref.read(downloadHistoryProvider.notifier).add(historyItem);
-
+      await _saveItem(item, onProgress: (p) => progressNotifier.value = p);
       if (mounted) {
         Navigator.of(context).pop();
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Item ${item.index} saved!')),
+          SnackBar(content: Text('Item ${item.index} saved to gallery!')),
         );
       }
     } catch (e) {
@@ -89,14 +96,69 @@ class _CarouselScreenState extends ConsumerState<CarouselScreen> {
       }
     } finally {
       progressNotifier.dispose();
+      if (mounted) setState(() => _isBusy = false);
+    }
+  }
+
+  Future<void> _downloadAllItems() async {
+    final items = widget.post.items;
+    if (_isBusy || items.isEmpty) return;
+
+    final progressNotifier = ValueNotifier<FileDownloadProgress?>(null);
+    final messageNotifier = ValueNotifier<String>('Downloading 1 of ${items.length}...');
+
+    setState(() => _isBusy = true);
+    if (mounted) {
+      DownloadProgressDialog.show(
+        context,
+        progressNotifier: progressNotifier,
+        messageNotifier: messageNotifier,
+      );
+    }
+
+    var saved = 0;
+    try {
+      for (var i = 0; i < items.length; i++) {
+        final item = items[i];
+        messageNotifier.value = 'Downloading ${i + 1} of ${items.length}...';
+        progressNotifier.value = null;
+        await _saveItem(item, onProgress: (p) => progressNotifier.value = p);
+        saved++;
+      }
+
+      if (mounted) {
+        Navigator.of(context).pop();
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Saved $saved items to gallery!')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        Navigator.of(context).pop();
+        final prefix = saved > 0 ? 'Saved $saved, then failed: ' : '';
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              '$prefix${e.toString().replaceFirst('Exception: ', '')}',
+            ),
+          ),
+        );
+      }
+    } finally {
+      progressNotifier.dispose();
+      messageNotifier.dispose();
+      if (mounted) setState(() => _isBusy = false);
     }
   }
 
   Future<void> _downloadAllZip() async {
+    if (_isBusy) return;
+
     setState(() {
       _errorMessage = null;
       _scopeLimited = false;
       _retryable = false;
+      _isBusy = true;
     });
 
     final progressNotifier = ValueNotifier<FileDownloadProgress?>(null);
@@ -149,12 +211,14 @@ class _CarouselScreenState extends ConsumerState<CarouselScreen> {
       }
     } finally {
       progressNotifier.dispose();
+      if (mounted) setState(() => _isBusy = false);
     }
   }
 
   @override
   Widget build(BuildContext context) {
     final items = widget.post.items;
+    final count = widget.post.count ?? items.length;
 
     return Scaffold(
       backgroundColor: AppColors.darkBackground,
@@ -165,31 +229,29 @@ class _CarouselScreenState extends ConsumerState<CarouselScreen> {
         child: Column(
           children: [
             Padding(
-              padding: const EdgeInsets.fromLTRB(20, 12, 20, 0),
+              padding: const EdgeInsets.fromLTRB(20, 12, 20, 8),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
                   Text(
                     widget.post.title,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
                     style: Theme.of(context).textTheme.titleMedium?.copyWith(
                           fontWeight: FontWeight.w600,
                         ),
                   ),
-                  if (widget.post.author.isNotEmpty)
+                  if (widget.post.author.isNotEmpty) ...[
+                    const SizedBox(height: 4),
                     Text(
                       '@${widget.post.author}',
                       style: const TextStyle(color: AppColors.textSecondary),
                     ),
+                  ],
                   const SizedBox(height: 4),
                   Text(
-                    '${widget.post.count ?? items.length} items',
+                    '$count items',
                     style: const TextStyle(color: AppColors.textSecondary),
-                  ),
-                  const SizedBox(height: 16),
-                  ElevatedButton.icon(
-                    onPressed: _downloadAllZip,
-                    icon: const Icon(Icons.folder_zip_outlined),
-                    label: const Text('Download all as ZIP'),
                   ),
                   if (_errorMessage != null) ...[
                     const SizedBox(height: 12),
@@ -200,27 +262,65 @@ class _CarouselScreenState extends ConsumerState<CarouselScreen> {
                       onRetry: _downloadAllZip,
                     ),
                   ],
-                  const SizedBox(height: 12),
                 ],
               ),
             ),
             Expanded(
-              child: GridView.builder(
-                padding: const EdgeInsets.all(20),
-                gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                  crossAxisCount: 2,
-                  crossAxisSpacing: 12,
-                  mainAxisSpacing: 12,
-                  childAspectRatio: 0.75,
-                ),
-                itemCount: items.length,
-                itemBuilder: (context, index) {
-                  final item = items[index];
-                  return _CarouselItemCard(
-                    item: item,
-                    onDownload: () => _downloadItem(item.index),
-                  );
-                },
+              child: items.isEmpty
+                  ? const Center(
+                      child: Padding(
+                        padding: EdgeInsets.all(24),
+                        child: Text(
+                          'No preview items available.\nYou can still download everything as a ZIP.',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(color: AppColors.textSecondary),
+                        ),
+                      ),
+                    )
+                  : GridView.builder(
+                      padding: const EdgeInsets.fromLTRB(20, 4, 20, 12),
+                      gridDelegate:
+                          const SliverGridDelegateWithFixedCrossAxisCount(
+                        crossAxisCount: 2,
+                        crossAxisSpacing: 12,
+                        mainAxisSpacing: 12,
+                        childAspectRatio: 0.72,
+                      ),
+                      itemCount: items.length,
+                      itemBuilder: (context, index) {
+                        final item = items[index];
+                        return _CarouselItemCard(
+                          item: item,
+                          onDownload: _isBusy
+                              ? null
+                              : () => _downloadItem(item.index),
+                        );
+                      },
+                    ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 8, 20, 16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  if (items.isNotEmpty)
+                    ElevatedButton.icon(
+                      onPressed: _isBusy ? null : _downloadAllItems,
+                      icon: const Icon(Icons.photo_library_outlined),
+                      label: const Text('Download all as photos'),
+                    ),
+                  if (items.isNotEmpty) const SizedBox(height: 10),
+                  OutlinedButton.icon(
+                    onPressed: _isBusy ? null : _downloadAllZip,
+                    icon: const Icon(Icons.folder_zip_outlined),
+                    label: const Text('Download all as ZIP'),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: AppColors.primary,
+                      side: const BorderSide(color: AppColors.primary),
+                      minimumSize: const Size.fromHeight(48),
+                    ),
+                  ),
+                ],
               ),
             ),
           ],
@@ -237,13 +337,14 @@ class _CarouselItemCard extends StatelessWidget {
   });
 
   final CarouselItem item;
-  final VoidCallback onDownload;
+  final VoidCallback? onDownload;
 
   @override
   Widget build(BuildContext context) {
-    final thumbnail = item.thumbnail ?? item.url;
+    final thumbnail = resolveApiUrl(item.thumbnail ?? item.url);
 
     return Card(
+      color: AppColors.darkCard,
       clipBehavior: Clip.antiAlias,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -252,15 +353,35 @@ class _CarouselItemCard extends StatelessWidget {
             child: Stack(
               fit: StackFit.expand,
               children: [
-                CachedNetworkImage(
-                  imageUrl: thumbnail,
-                  fit: BoxFit.cover,
-                  placeholder: (_, __) => Container(color: Colors.grey.shade200),
-                  errorWidget: (_, __, ___) => Container(
-                    color: Colors.grey.shade200,
-                    child: const Icon(Icons.broken_image),
+                if (thumbnail.isNotEmpty)
+                  CachedNetworkImage(
+                    imageUrl: thumbnail,
+                    fit: BoxFit.cover,
+                    placeholder: (_, __) => Container(
+                      color: AppColors.darkSurface,
+                      child: const Center(
+                        child: CircularProgressIndicator(
+                          color: AppColors.primary,
+                          strokeWidth: 2,
+                        ),
+                      ),
+                    ),
+                    errorWidget: (_, __, ___) => Container(
+                      color: AppColors.darkSurface,
+                      child: const Icon(
+                        Icons.broken_image,
+                        color: AppColors.textSecondary,
+                      ),
+                    ),
+                  )
+                else
+                  Container(
+                    color: AppColors.darkSurface,
+                    child: const Icon(
+                      Icons.image_outlined,
+                      color: AppColors.textSecondary,
+                    ),
                   ),
-                ),
                 if (item.isVideo)
                   const Center(
                     child: Icon(

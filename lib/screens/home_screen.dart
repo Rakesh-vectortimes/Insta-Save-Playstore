@@ -317,25 +317,38 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
   }
 
   Future<void> _saveProfilePicture() async {
-    if (_profile == null || _profile!.dpUrl.isEmpty) return;
+    if (_profile == null || _profile!.username.isEmpty) return;
 
     setState(() => _isProfileSaving = true);
     final progressNotifier = ValueNotifier<FileDownloadProgress?>(null);
+    final progressMessage = _profile!.upscaleAvailable
+        ? 'Fetching HD profile picture...'
+        : 'Downloading profile picture...';
 
     if (mounted) {
-      DownloadProgressDialog.show(context, progressNotifier: progressNotifier);
+      DownloadProgressDialog.show(
+        context,
+        progressNotifier: progressNotifier,
+        message: progressMessage,
+      );
     }
 
     try {
+      final api = ref.read(instagramApiServiceProvider);
+      final download = await api.downloadProfilePicture(
+        _profile!.username,
+        onProgress: (p) => progressNotifier.value = p,
+      );
+
       final fileName = _downloadService.buildFileName(
-        prefix: 'instasave_${_profile!.username}',
+        prefix:
+            'instasave_${_profile!.username}_dp${download.wasUpscaled ? '_hd' : ''}',
         ext: 'jpg',
       );
-      final result = await _downloadService.downloadAndSave(
-        url: _profile!.dpUrl,
+      final result = await _downloadService.saveBytes(
+        bytes: download.bytes,
         fileName: fileName,
         saveType: MediaSaveType.image,
-        onProgress: (p) => progressNotifier.value = p,
       );
 
       final historyItem = DownloadItem(
@@ -345,7 +358,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
         thumbnailUrl: _profile!.dpUrl,
         sourceUrl: 'https://www.instagram.com/${_profile!.username}/',
         type: DownloadMediaType.photo,
-        quality: 'HD',
+        quality: download.wasUpscaled ? 'Upscaled' : 'HD',
         fileSizeBytes: result.fileSizeBytes,
         downloadedAt: DateTime.now(),
         author: _profile!.username,
@@ -358,7 +371,20 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
       if (mounted) {
         Navigator.of(context).pop();
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Profile picture saved!')),
+          SnackBar(
+            content: Text(
+              download.wasUpscaled
+                  ? 'HD profile picture saved!'
+                  : 'Profile picture saved!',
+            ),
+          ),
+        );
+      }
+    } on ApiException catch (e) {
+      if (mounted) {
+        Navigator.of(context).pop();
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(e.message)),
         );
       }
     } catch (e) {
@@ -694,6 +720,17 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                                   fontSize: 12,
                                 ),
                               ),
+                              if (_profile!.upscaleAvailable) ...[
+                                const SizedBox(height: 2),
+                                Text(
+                                  'HD upscale available',
+                                  style: GoogleFonts.poppins(
+                                    color: AppColors.primary,
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w500,
+                                  ),
+                                ),
+                              ],
                             ],
                           ),
                         ),
@@ -717,7 +754,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                                   ),
                                 )
                               : Text(
-                                  'Save',
+                                  _profile!.upscaleAvailable ? 'HD' : 'Save',
                                   style:
                                       GoogleFonts.poppins(fontWeight: FontWeight.w600),
                                 ),

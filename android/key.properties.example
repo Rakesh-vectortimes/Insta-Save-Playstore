@@ -1,0 +1,4 @@
+storePassword=YOUR_KEYSTORE_PASSWORD
+keyPassword=YOUR_KEY_PASSWORD
+keyAlias=instasave
+storeFile=C:\\Users\\ADMIN\\Desktop\\instasave-release.jks

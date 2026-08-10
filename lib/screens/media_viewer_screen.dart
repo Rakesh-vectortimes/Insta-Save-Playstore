@@ -130,16 +130,18 @@ class _MediaViewerScreenState extends State<MediaViewerScreen> {
         ],
       ),
       body: SafeArea(
-        child: Center(child: _buildContent()),
+        child: _buildContent(),
       ),
     );
   }
 
   Widget _buildContent() {
     if (_error != null) {
-      return Text(
-        _error!,
-        style: const TextStyle(color: AppColors.textPrimary),
+      return Center(
+        child: Text(
+          _error!,
+          style: const TextStyle(color: AppColors.textPrimary),
+        ),
       );
     }
 
@@ -147,21 +149,28 @@ class _MediaViewerScreenState extends State<MediaViewerScreen> {
       if (_isInitializing ||
           _videoController == null ||
           !_videoController!.value.isInitialized) {
-        return const CircularProgressIndicator(color: AppColors.accent);
+        return const Center(
+          child: CircularProgressIndicator(color: AppColors.accent),
+        );
       }
       return _buildVideoPlayer(_videoController!);
     }
 
+    final screenWidth = MediaQuery.sizeOf(context).width;
     return InteractiveViewer(
       minScale: 1,
-      maxScale: 4,
-      child: Image.file(
-        File(widget.item.localPath),
-        fit: BoxFit.contain,
-        errorBuilder: (_, __, ___) => const Icon(
-          Icons.broken_image_outlined,
-          color: AppColors.textSecondary,
-          size: 56,
+      maxScale: 5,
+      child: Center(
+        child: Image.file(
+          File(widget.item.localPath),
+          width: screenWidth,
+          fit: BoxFit.contain,
+          filterQuality: FilterQuality.high,
+          errorBuilder: (_, __, ___) => const Icon(
+            Icons.broken_image_outlined,
+            color: AppColors.textSecondary,
+            size: 56,
+          ),
         ),
       ),
     );

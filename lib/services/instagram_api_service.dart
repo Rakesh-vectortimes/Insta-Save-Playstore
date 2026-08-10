@@ -5,6 +5,7 @@ import '../core/api_client.dart';
 import '../models/post_result.dart';
 import '../models/profile_result.dart';
 import '../models/reel_result.dart';
+import 'download_service.dart';
 
 final instagramApiServiceProvider = Provider<InstagramApiService>((ref) {
   return InstagramApiService(ref.watch(dioProvider));
@@ -58,6 +59,40 @@ class InstagramApiService {
         '/api/instagram/dp/$username',
       );
       return ProfileResult.fromJson(response.data!);
+    } on DioException catch (e) {
+      throw ApiException.fromDioException(e);
+    }
+  }
+
+  Future<ProfilePictureDownloadResult> downloadProfilePicture(
+    String username, {
+    bool? upscale,
+    void Function(FileDownloadProgress progress)? onProgress,
+  }) async {
+    try {
+      final queryParams = <String, dynamic>{};
+      if (upscale != null) {
+        queryParams['upscale'] = upscale ? 1 : 0;
+      }
+
+      final response = await _dio.get<List<int>>(
+        '/api/instagram/dp/$username/download',
+        queryParameters: queryParams.isEmpty ? null : queryParams,
+        options: Options(responseType: ResponseType.bytes),
+        onReceiveProgress: (received, total) {
+          onProgress?.call(
+            FileDownloadProgress(received: received, total: total),
+          );
+        },
+      );
+
+      final wasUpscaled =
+          response.headers.value('x-dp-upscaled')?.toLowerCase() == 'true';
+
+      return ProfilePictureDownloadResult(
+        bytes: response.data ?? [],
+        wasUpscaled: wasUpscaled,
+      );
     } on DioException catch (e) {
       throw ApiException.fromDioException(e);
     }

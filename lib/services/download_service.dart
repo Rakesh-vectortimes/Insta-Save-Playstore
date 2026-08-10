@@ -124,15 +124,26 @@ class DownloadService {
     final destPath = '${appDir.path}/$fileName';
     await File(destPath).writeAsBytes(bytes);
 
-    if (saveType == MediaSaveType.zip || saveType == MediaSaveType.audio) {
-      final publicDir = await _getPublicDownloadsDirectory();
-      await File(destPath).copy('${publicDir.path}/$fileName');
+    var gallerySaved = false;
+    switch (saveType) {
+      case MediaSaveType.image:
+        await Gal.putImage(destPath, album: AppConstants.appName);
+        gallerySaved = true;
+      case MediaSaveType.video:
+        await Gal.putVideo(destPath, album: AppConstants.appName);
+        gallerySaved = true;
+      case MediaSaveType.audio:
+      case MediaSaveType.zip:
+        final publicDir = await _getPublicDownloadsDirectory();
+        await File(destPath).copy('${publicDir.path}/$fileName');
+      case MediaSaveType.other:
+        break;
     }
 
     return DownloadResult(
       savedPath: destPath,
       fileSizeBytes: bytes.length,
-      gallerySaved: false,
+      gallerySaved: gallerySaved,
     );
   }
 

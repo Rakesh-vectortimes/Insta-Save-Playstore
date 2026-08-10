@@ -29,6 +29,7 @@ class DownloadProgressDialog extends StatelessWidget {
             const SizedBox(height: 20),
             Text(
               message,
+              textAlign: TextAlign.center,
               style: const TextStyle(fontWeight: FontWeight.w600),
             ),
             const SizedBox(height: 12),
@@ -54,6 +55,7 @@ class DownloadProgressDialog extends StatelessWidget {
     BuildContext context, {
     required ValueNotifier<FileDownloadProgress?> progressNotifier,
     String message = 'Downloading...',
+    ValueNotifier<String>? messageNotifier,
   }) {
     return showDialog<void>(
       context: context,
@@ -62,9 +64,20 @@ class DownloadProgressDialog extends StatelessWidget {
         return ValueListenableBuilder<FileDownloadProgress?>(
           valueListenable: progressNotifier,
           builder: (context, progress, _) {
-            return DownloadProgressDialog(
-              progress: progress,
-              message: message,
+            if (messageNotifier == null) {
+              return DownloadProgressDialog(
+                progress: progress,
+                message: message,
+              );
+            }
+            return ValueListenableBuilder<String>(
+              valueListenable: messageNotifier,
+              builder: (context, dynamicMessage, _) {
+                return DownloadProgressDialog(
+                  progress: progress,
+                  message: dynamicMessage,
+                );
+              },
             );
           },
         );
