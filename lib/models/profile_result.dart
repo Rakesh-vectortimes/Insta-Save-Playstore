@@ -11,6 +11,7 @@ class ProfileResult {
     this.upscaleFactor,
     this.estimatedUpscaledSize,
     this.upscaleNote,
+    this.source,
   });
 
   final String username;
@@ -24,20 +25,39 @@ class ProfileResult {
   final int? upscaleFactor;
   final int? estimatedUpscaledSize;
   final String? upscaleNote;
+  final String? source;
 
   factory ProfileResult.fromJson(Map<String, dynamic> json) {
     return ProfileResult(
-      username: json['username'] as String? ?? '',
-      fullName: json['fullName'] as String? ?? '',
-      dpUrl: json['dpUrl'] as String? ?? '',
-      isPrivate: json['isPrivate'] as bool? ?? false,
-      followers: (json['followers'] as num?)?.toInt() ?? 0,
-      dpSize: (json['dpSize'] as num?)?.toInt(),
-      lowQuality: json['lowQuality'] as bool? ?? false,
-      upscaleAvailable: json['upscaleAvailable'] as bool? ?? false,
-      upscaleFactor: (json['upscaleFactor'] as num?)?.toInt(),
-      estimatedUpscaledSize: (json['estimatedUpscaledSize'] as num?)?.toInt(),
-      upscaleNote: json['upscaleNote'] as String?,
+      username: (json['username'] ?? json['userName'] ?? '') as String? ?? '',
+      fullName: (json['fullName'] ?? json['full_name'] ?? '') as String? ?? '',
+      dpUrl: (json['dpUrl'] ??
+              json['dp_url'] ??
+              json['profilePicUrl'] ??
+              json['profile_pic_url'] ??
+              '') as String? ??
+          '',
+      isPrivate: json['isPrivate'] as bool? ??
+          json['is_private'] as bool? ??
+          false,
+      followers: (json['followers'] as num?)?.toInt() ??
+          (json['follower_count'] as num?)?.toInt() ??
+          0,
+      dpSize: (json['dpSize'] as num?)?.toInt() ??
+          (json['dp_size'] as num?)?.toInt(),
+      lowQuality: json['lowQuality'] as bool? ??
+          json['low_quality'] as bool? ??
+          false,
+      upscaleAvailable: json['upscaleAvailable'] as bool? ??
+          json['upscale_available'] as bool? ??
+          false,
+      upscaleFactor: (json['upscaleFactor'] as num?)?.toInt() ??
+          (json['upscale_factor'] as num?)?.toInt(),
+      estimatedUpscaledSize: (json['estimatedUpscaledSize'] as num?)?.toInt() ??
+          (json['estimated_upscaled_size'] as num?)?.toInt(),
+      upscaleNote: json['upscaleNote'] as String? ??
+          json['upscale_note'] as String?,
+      source: json['source'] as String?,
     );
   }
 }

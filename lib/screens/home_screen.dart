@@ -5,6 +5,7 @@ import 'package:google_fonts/google_fonts.dart';
 
 import '../core/api_client.dart';
 import '../core/constants.dart';
+import '../core/responsive.dart';
 import '../core/url_detector.dart';
 import '../models/download_item.dart';
 import '../models/post_result.dart';
@@ -37,6 +38,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
   final _urlController = TextEditingController();
   final _usernameController = TextEditingController();
   final _downloadService = DownloadService();
+  final _previewScrollController = ScrollController();
 
   bool _isFetching = false;
   bool _isSaving = false;
@@ -48,6 +50,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
   bool _retryable = false;
   bool _profileScopeLimited = false;
   bool _profileRetryable = false;
+  String? _statusMessage;
 
   String? _sourceUrl;
   ReelResult? _reel;
@@ -72,6 +75,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
     WidgetsBinding.instance.removeObserver(this);
     _urlController.dispose();
     _usernameController.dispose();
+    _previewScrollController.dispose();
     super.dispose();
   }
 
@@ -121,6 +125,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
       _errorMessage = null;
       _scopeLimited = false;
       _retryable = false;
+      _statusMessage = 'Fetching video…';
       _reel = null;
       _post = null;
       _lastSavedItem = null;
@@ -132,6 +137,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
         _isFetching = false;
         _errorMessage = detection.errorMessage;
         _scopeLimited = detection.type == InstagramUrlType.story;
+        _statusMessage = null;
       });
       return;
     }
@@ -140,7 +146,46 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
     final api = ref.read(instagramApiServiceProvider);
 
     try {
-      if (detection.type == InstagramUrlType.reel) {
+      if (detection.type == InstagramUrlType.profile) {
+        final username = UrlDetector.sanitizeUsername(
+          detection.normalizedUrl!,
+        );
+        setState(() {
+          _isFetching = false;
+          _statusMessage = null;
+          if (username.isNotEmpty) {
+            _usernameController.text = username;
+          }
+        });
+        await _fetchProfilePicture();
+        return;
+      }
+
+      if (detection.type == InstagramUrlType.story) {
+        setState(() => _statusMessage = 'Fetching story…');
+        final story = await api.fetchStory(detection.normalizedUrl!);
+        if (story.reel != null) {
+          final reel = story.reel!;
+          final qualities = reel.availableQualitiesForFormat('mp4');
+          setState(() {
+            _reel = reel;
+            _post = null;
+            _selectedFormat =
+                reel.formats.contains('mp4') ? 'mp4' : reel.formats.first;
+            _selectedQuality = qualities.contains(720)
+                ? 720
+                : (qualities.isNotEmpty ? qualities.last : 720);
+            _statusMessage = 'Story ready — tap Save to Gallery to finish.';
+          });
+        } else if (story.post != null) {
+          setState(() {
+            _reel = null;
+            _post = story.post;
+            _statusMessage = 'Story ready — tap Save to Gallery to finish.';
+          });
+        }
+        _scrollPreviewIntoView();
+      } else if (detection.type == InstagramUrlType.reel) {
         final reel = await api.fetchReel(detection.normalizedUrl!);
         final qualities = reel.availableQualitiesForFormat('mp4');
         setState(() {
@@ -149,11 +194,14 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
           _selectedQuality = qualities.contains(720)
               ? 720
               : (qualities.isNotEmpty ? qualities.last : 720);
+          _statusMessage = 'Video ready — tap Save to Gallery to finish.';
         });
+        _scrollPreviewIntoView();
       } else {
         final post = await api.fetchPost(detection.normalizedUrl!);
         if (post.isCarousel) {
           if (!mounted) return;
+          setState(() => _statusMessage = null);
           await Navigator.of(context).push(
             MaterialPageRoute(
               builder: (_) => CarouselScreen(
@@ -163,7 +211,13 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
             ),
           );
         } else {
-          setState(() => _post = post);
+          setState(() {
+            _post = post;
+            _statusMessage = post.type == PostType.video
+                ? 'Video ready — tap Save to Gallery to finish.'
+                : 'Photo ready — tap Save to Gallery to finish.';
+          });
+          _scrollPreviewIntoView();
         }
       }
     } on ApiException catch (e) {
@@ -171,15 +225,75 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
         _errorMessage = e.message;
         _scopeLimited = e.scopeLimited;
         _retryable = e.retryable;
+        _statusMessage = null;
       });
+      if (e.reasonCode == 'story_requires_login' && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(e.message),
+            duration: const Duration(seconds: 5),
+            action: SnackBarAction(
+              label: 'How?',
+              onPressed: _showLoginHint,
+            ),
+          ),
+        );
+      }
     } catch (_) {
       setState(() {
         _errorMessage = 'Something went wrong. Please try again.';
         _retryable = true;
+        _statusMessage = null;
       });
     } finally {
       if (mounted) setState(() => _isFetching = false);
     }
+  }
+
+  void _showLoginHint() {
+    if (!mounted) return;
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Login required for stories'),
+        content: const Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('To download stories:'),
+            SizedBox(height: 12),
+            Text('1. Open Chrome on your phone'),
+            Text('2. Go to instagram.com'),
+            Text('3. Log into your account'),
+            Text('4. Come back to this app'),
+            Text('5. Paste the story link again'),
+            SizedBox(height: 12),
+            Text(
+              'Stories are only visible to logged-in users. '
+              'This app uses your existing browser session — it does not ask for your password.',
+              style: TextStyle(color: Colors.grey, fontSize: 12),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Got it'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _scrollPreviewIntoView() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!_previewScrollController.hasClients) return;
+      _previewScrollController.animateTo(
+        0,
+        duration: const Duration(milliseconds: 350),
+        curve: Curves.easeOut,
+      );
+    });
   }
 
   Future<void> _saveToDevice({bool asAudio = false}) async {
@@ -189,6 +303,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
     final progressNotifier = ValueNotifier<FileDownloadProgress?>(null);
 
     if (mounted) {
+      setState(() => _statusMessage = 'Saving to gallery…');
       DownloadProgressDialog.show(context, progressNotifier: progressNotifier);
     }
 
@@ -266,14 +381,20 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
       await ref.read(downloadHistoryProvider.notifier).add(item);
       if (mounted) {
         Navigator.of(context).pop();
-        setState(() => _lastSavedItem = item);
+        setState(() {
+          _lastSavedItem = item;
+          _statusMessage = 'Saved to gallery successfully.';
+        });
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Saved successfully!')),
+          const SnackBar(content: Text('Saved to gallery successfully!')),
         );
       }
     } catch (e) {
       if (mounted) {
         Navigator.of(context).pop();
+        setState(() {
+          _statusMessage = 'Video ready — tap Save to Gallery to finish.';
+        });
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text(e.toString().replaceFirst('Exception: ', ''))),
         );
@@ -286,7 +407,28 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
 
   Future<void> _fetchProfilePicture() async {
     final username = UrlDetector.sanitizeUsername(_usernameController.text);
-    if (username.isEmpty) return;
+    if (username.isEmpty) {
+      setState(() {
+        _profileErrorMessage =
+            'Enter an Instagram username (e.g. cristiano), without spaces.';
+        _profileRetryable = false;
+      });
+      return;
+    }
+    if (!UrlDetector.isValidUsername(username)) {
+      setState(() {
+        _profileErrorMessage =
+            'Invalid username. Use letters, numbers, periods or underscores only.';
+        _profileRetryable = false;
+        _profile = null;
+      });
+      return;
+    }
+
+    // Reflect sanitized username in the field so testers see what was sent.
+    if (_usernameController.text.trim() != username) {
+      _usernameController.text = username;
+    }
 
     setState(() {
       _isProfileLoading = true;
@@ -308,7 +450,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
       });
     } catch (_) {
       setState(() {
-        _profileErrorMessage = 'Something went wrong. Please try again.';
+        _profileErrorMessage =
+            'Unable to retrieve the profile picture. Please check the username and try again.';
         _profileRetryable = true;
       });
     } finally {
@@ -337,6 +480,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
       final api = ref.read(instagramApiServiceProvider);
       final download = await api.downloadProfilePicture(
         _profile!.username,
+        upscale: _profile!.upscaleAvailable ? true : null,
+        directUrl: _profile!.dpUrl,
+        preferDirect: _profile!.source?.startsWith('webview') == true &&
+            !(_profile!.upscaleAvailable),
         onProgress: (p) => progressNotifier.value = p,
       );
 
@@ -458,6 +605,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                 showModalBottomSheet<void>(
                   context: context,
                   backgroundColor: AppColors.darkSurface,
+                  constraints: BoxConstraints(
+                    maxWidth: AppBreakpoints.isTablet(context)
+                        ? 560
+                        : double.infinity,
+                  ),
                   shape: const RoundedRectangleBorder(
                     borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
                   ),
@@ -515,6 +667,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                 );
               },
             ),
+            Expanded(
+              child: AdaptiveBody(
+                child: Column(
+                  children: [
             const RollingDisclaimer(),
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 0, 16, 6),
@@ -591,7 +747,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                             ),
                           )
                         : Text(
-                            'Download',
+                            'Get Video',
                             style: GoogleFonts.poppins(fontWeight: FontWeight.w600),
                           ),
                   ),
@@ -616,7 +772,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                           fontSize: 14,
                         ),
                         decoration: InputDecoration(
-                          hintText: 'Enter username (e.g. leo messi)',
+                          hintText: 'Enter username (e.g. cristiano)',
                           hintStyle: GoogleFonts.poppins(
                             color: AppColors.textMuted,
                             fontSize: 14,
@@ -720,6 +876,20 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                                   fontSize: 12,
                                 ),
                               ),
+                              if (_profile!.source != null) ...[
+                                const SizedBox(height: 2),
+                                Text(
+                                  _profile!.source == 'webview_hd'
+                                      ? 'HD from profile page'
+                                      : _profile!.source == 'webview_standard'
+                                          ? 'Standard from profile page'
+                                          : 'Source: ${_profile!.source}',
+                                  style: GoogleFonts.poppins(
+                                    color: AppColors.textMuted,
+                                    fontSize: 11,
+                                  ),
+                                ),
+                              ],
                               if (_profile!.upscaleAvailable) ...[
                                 const SizedBox(height: 2),
                                 Text(
@@ -781,7 +951,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                           ),
                           const SizedBox(height: 16),
                           Text(
-                            'Fetching content...',
+                            'Fetching video…',
                             style: GoogleFonts.poppins(
                               color: AppColors.textSecondary,
                             ),
@@ -790,75 +960,124 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                       ),
                     )
                   : _hasPreview
-                      ? SingleChildScrollView(
-                          child: Column(
-                            children: [
-                              ContentPreviewCard(
-                                thumbnailUrl: _thumbnailUrl,
-                                fileSizeLabel: _estimatedSize,
-                                qualityLabel: _qualityLabel,
-                                author: _author,
-                                isVideo: _isVideo,
-                                onMoreTap: null,
-                              ),
-                              if (_reel != null) ...[
-                                const SizedBox(height: 16),
-                                Padding(
-                                  padding: const EdgeInsets.symmetric(horizontal: 16),
-                                  child: FormatSelector(
-                                    formats: _reel!.formats.toSet().toList(),
-                                    selectedFormat: _selectedFormat,
-                                    onFormatSelected: (f) => setState(() {
-                                      _selectedFormat = f;
-                                      final q = _reel!
-                                          .availableQualitiesForFormat(f);
-                                      if (!q.contains(_selectedQuality) &&
-                                          q.isNotEmpty) {
-                                        _selectedQuality =
-                                            q.contains(720) ? 720 : q.last;
-                                      }
-                                    }),
-                                  ),
-                                ),
-                                const SizedBox(height: 12),
-                                Padding(
-                                  padding: const EdgeInsets.symmetric(horizontal: 16),
-                                  child: QualitySelector(
-                                    qualities: _reel!
-                                        .availableQualitiesForFormat(_selectedFormat),
-                                    selectedQuality: _selectedQuality,
-                                    onQualitySelected: (q) =>
-                                        setState(() => _selectedQuality = q),
-                                  ),
-                                ),
-                              ],
-                              const SizedBox(height: 16),
+                      ? Column(
+                          children: [
+                            if (_statusMessage != null)
                               Padding(
-                                padding: const EdgeInsets.symmetric(horizontal: 16),
-                                child: SizedBox(
+                                padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                                child: Container(
                                   width: double.infinity,
-                                  height: 50,
-                                  child: ElevatedButton(
-                                    onPressed: _isSaving ? null : _saveToDevice,
-                                    style: ElevatedButton.styleFrom(
-                                      backgroundColor: AppColors.accent,
-                                      shape: RoundedRectangleBorder(
-                                        borderRadius: BorderRadius.circular(14),
-                                      ),
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 12,
+                                    vertical: 10,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: AppColors.success.withOpacity(0.12),
+                                    borderRadius: BorderRadius.circular(12),
+                                    border: Border.all(
+                                      color: AppColors.success.withOpacity(0.35),
                                     ),
-                                    child: Text(
-                                      _isSaving ? 'Saving...' : 'Save to Gallery',
-                                      style: GoogleFonts.poppins(
-                                        fontWeight: FontWeight.w600,
-                                        color: Colors.white,
-                                      ),
+                                  ),
+                                  child: Text(
+                                    _statusMessage!,
+                                    style: GoogleFonts.poppins(
+                                      color: AppColors.textPrimary,
+                                      fontSize: 13,
+                                      fontWeight: FontWeight.w500,
                                     ),
                                   ),
                                 ),
                               ),
-                              const SizedBox(height: 24),
-                            ],
-                          ),
+                            Padding(
+                              padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
+                              child: SizedBox(
+                                width: double.infinity,
+                                height: 50,
+                                child: ElevatedButton.icon(
+                                  onPressed: _isSaving ? null : _saveToDevice,
+                                  icon: Icon(
+                                    _isSaving
+                                        ? Icons.hourglass_top_rounded
+                                        : Icons.download_rounded,
+                                    color: Colors.white,
+                                  ),
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: AppColors.accent,
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(14),
+                                    ),
+                                  ),
+                                  label: Text(
+                                    _isSaving
+                                        ? 'Saving to gallery…'
+                                        : 'Save to Gallery',
+                                    style: GoogleFonts.poppins(
+                                      fontWeight: FontWeight.w600,
+                                      color: Colors.white,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                            Expanded(
+                              child: SingleChildScrollView(
+                                controller: _previewScrollController,
+                                child: Column(
+                                  children: [
+                                    if (_reel != null) ...[
+                                      Padding(
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 16,
+                                        ),
+                                        child: FormatSelector(
+                                          formats:
+                                              _reel!.formats.toSet().toList(),
+                                          selectedFormat: _selectedFormat,
+                                          onFormatSelected: (f) =>
+                                              setState(() {
+                                            _selectedFormat = f;
+                                            final q = _reel!
+                                                .availableQualitiesForFormat(f);
+                                            if (!q.contains(_selectedQuality) &&
+                                                q.isNotEmpty) {
+                                              _selectedQuality =
+                                                  q.contains(720) ? 720 : q.last;
+                                            }
+                                          }),
+                                        ),
+                                      ),
+                                      const SizedBox(height: 12),
+                                      Padding(
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 16,
+                                        ),
+                                        child: QualitySelector(
+                                          qualities: _reel!
+                                              .availableQualitiesForFormat(
+                                            _selectedFormat,
+                                          ),
+                                          selectedQuality: _selectedQuality,
+                                          onQualitySelected: (q) => setState(
+                                            () => _selectedQuality = q,
+                                          ),
+                                        ),
+                                      ),
+                                      const SizedBox(height: 12),
+                                    ],
+                                    ContentPreviewCard(
+                                      thumbnailUrl: _thumbnailUrl,
+                                      fileSizeLabel: _estimatedSize,
+                                      qualityLabel: _qualityLabel,
+                                      author: _author,
+                                      isVideo: _isVideo,
+                                      onMoreTap: null,
+                                    ),
+                                    const SizedBox(height: 24),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ],
                         )
                       : Center(
                           child: Column(
@@ -871,14 +1090,26 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                               ),
                               const SizedBox(height: 12),
                               Text(
-                                'Paste a link and tap Download',
+                                'Paste a link and tap Get Video',
                                 style: GoogleFonts.poppins(
                                   color: AppColors.textSecondary,
+                                ),
+                              ),
+                              const SizedBox(height: 6),
+                              Text(
+                                'Then tap Save to Gallery to finish',
+                                style: GoogleFonts.poppins(
+                                  color: AppColors.textMuted,
+                                  fontSize: 12,
                                 ),
                               ),
                             ],
                           ),
                         ),
+            ),
+                  ],
+                ),
+              ),
             ),
           ],
         ),

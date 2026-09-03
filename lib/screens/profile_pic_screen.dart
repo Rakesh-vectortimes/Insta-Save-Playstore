@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/api_client.dart';
 import '../core/constants.dart';
+import '../core/responsive.dart';
 import '../core/url_detector.dart';
 import '../models/download_item.dart';
 import '../models/profile_result.dart';
@@ -40,7 +41,27 @@ class _ProfilePicScreenState extends ConsumerState<ProfilePicScreen> {
 
   Future<void> _search() async {
     final username = UrlDetector.sanitizeUsername(_usernameController.text);
-    if (username.isEmpty) return;
+    if (username.isEmpty) {
+      setState(() {
+        _errorMessage =
+            'Enter an Instagram username (e.g. cristiano), without spaces.';
+        _retryable = false;
+      });
+      return;
+    }
+    if (!UrlDetector.isValidUsername(username)) {
+      setState(() {
+        _errorMessage =
+            'Invalid username. Use letters, numbers, periods or underscores only.';
+        _retryable = false;
+        _profile = null;
+      });
+      return;
+    }
+
+    if (_usernameController.text.trim() != username) {
+      _usernameController.text = username;
+    }
 
     setState(() {
       _isLoading = true;
@@ -62,7 +83,8 @@ class _ProfilePicScreenState extends ConsumerState<ProfilePicScreen> {
       });
     } catch (_) {
       setState(() {
-        _errorMessage = 'Something went wrong. Please try again.';
+        _errorMessage =
+            'Unable to retrieve the profile picture. Please check the username and try again.';
         _retryable = true;
       });
     } finally {
@@ -92,6 +114,10 @@ class _ProfilePicScreenState extends ConsumerState<ProfilePicScreen> {
       final api = ref.read(instagramApiServiceProvider);
       final download = await api.downloadProfilePicture(
         profile.username,
+        upscale: profile.upscaleAvailable ? true : null,
+        directUrl: profile.dpUrl,
+        preferDirect: profile.source?.startsWith('webview') == true &&
+            !profile.upscaleAvailable,
         onProgress: (p) => progressNotifier.value = p,
       );
 
@@ -171,7 +197,9 @@ class _ProfilePicScreenState extends ConsumerState<ProfilePicScreen> {
         title: const Text('Profile Picture'),
       ),
       body: SafeArea(
-        child: SingleChildScrollView(
+        child: AdaptiveBody(
+          maxWidth: 640,
+          child: SingleChildScrollView(
           padding: const EdgeInsets.all(20),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -186,7 +214,7 @@ class _ProfilePicScreenState extends ConsumerState<ProfilePicScreen> {
                 textInputAction: TextInputAction.search,
                 onSubmitted: (_) => _isLoading ? null : _search(),
                 decoration: const InputDecoration(
-                  hintText: 'Enter username (e.g. leo messi)',
+                  hintText: 'Enter username (e.g. cristiano)',
                   prefixIcon: Icon(Icons.alternate_email, color: AppColors.primary),
                 ),
               ),
@@ -288,6 +316,7 @@ class _ProfilePicScreenState extends ConsumerState<ProfilePicScreen> {
               ],
             ],
           ),
+        ),
         ),
       ),
     );

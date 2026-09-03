@@ -4,6 +4,7 @@ enum InstagramUrlType {
   reel,
   post,
   story,
+  profile,
   invalid,
 }
 
@@ -51,7 +52,6 @@ class UrlDetector {
       return UrlDetectionResult(
         type: InstagramUrlType.story,
         normalizedUrl: normalized,
-        errorMessage: AppConstants.storyNotSupportedMessage,
       );
     }
 
@@ -62,11 +62,37 @@ class UrlDetector {
       );
     }
 
-    if (lower.contains('/p/')) {
+    if (lower.contains('/p/') || lower.contains('/tv/')) {
       return UrlDetectionResult(
         type: InstagramUrlType.post,
         normalizedUrl: normalized,
       );
+    }
+
+    final profileMatch = RegExp(
+      r'instagram\.com/([A-Za-z0-9._]+)/?$',
+      caseSensitive: false,
+    ).firstMatch(normalized);
+    if (profileMatch != null) {
+      final handle = profileMatch.group(1)!.toLowerCase();
+      const reserved = {
+        'reel',
+        'reels',
+        'p',
+        'tv',
+        'stories',
+        'accounts',
+        'explore',
+        'direct',
+        'about',
+        'legal',
+      };
+      if (!reserved.contains(handle)) {
+        return UrlDetectionResult(
+          type: InstagramUrlType.profile,
+          normalizedUrl: normalized,
+        );
+      }
     }
 
     return const UrlDetectionResult(
@@ -88,20 +114,40 @@ class UrlDetector {
     }
   }
 
+  /// Normalizes pasted Instagram usernames.
+  /// Accepts `@user`, profile URLs, and strips invalid characters/spaces.
   static String sanitizeUsername(String input) {
-    return input.trim().replaceFirst(RegExp(r'^@+'), '');
+    var value = input.trim();
+    if (value.isEmpty) return '';
+
+    final urlMatch = RegExp(
+      r'(?:https?://)?(?:www\.)?instagram\.com/([A-Za-z0-9._]+)/?',
+      caseSensitive: false,
+    ).firstMatch(value);
+    if (urlMatch != null) {
+      value = urlMatch.group(1)!;
+    }
+
+    value = value.replaceFirst(RegExp(r'^@+'), '');
+    value = value.split(RegExp(r'[/?#]')).first;
+    value = value.replaceAll(RegExp(r'\s+'), '');
+    return value;
   }
 
-  /// Pulls the first Instagram post/reel URL out of arbitrary clipboard text.
+  static bool isValidUsername(String username) {
+    return RegExp(r'^[A-Za-z0-9._]{1,30}$').hasMatch(username);
+  }
+
+  /// Pulls the first Instagram post/reel/story URL out of arbitrary clipboard text.
   static String? extractInstagramUrl(String text) {
     final match = RegExp(
-      r'https?://(?:www\.)?instagram\.com/(?:reel|reels|p)/[A-Za-z0-9_-]+/?',
+      r'https?://(?:www\.)?instagram\.com/(?:reel|reels|p|tv|stories/[A-Za-z0-9._]+)/[A-Za-z0-9_-]+/?',
       caseSensitive: false,
     ).firstMatch(text);
     if (match != null) return match.group(0);
 
     final loose = RegExp(
-      r'(?:www\.)?instagram\.com/(?:reel|reels|p)/[A-Za-z0-9_-]+/?',
+      r'(?:www\.)?instagram\.com/(?:reel|reels|p|tv|stories/[A-Za-z0-9._]+)/[A-Za-z0-9_-]+/?',
       caseSensitive: false,
     ).firstMatch(text);
     if (loose != null) return 'https://${loose.group(0)}';
