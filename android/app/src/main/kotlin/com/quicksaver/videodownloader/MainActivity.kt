@@ -1,4 +1,4 @@
-package com.instasave.instasave
+package com.quicksaver.videodownloader
 
 import io.flutter.embedding.android.FlutterActivity
 

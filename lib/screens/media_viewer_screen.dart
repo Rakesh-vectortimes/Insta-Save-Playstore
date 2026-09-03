@@ -157,13 +157,14 @@ class _MediaViewerScreenState extends State<MediaViewerScreen> {
     }
 
     final screenWidth = MediaQuery.sizeOf(context).width;
+    final imageWidth = screenWidth > 900 ? 900.0 : screenWidth;
     return InteractiveViewer(
       minScale: 1,
       maxScale: 5,
       child: Center(
         child: Image.file(
           File(widget.item.localPath),
-          width: screenWidth,
+          width: imageWidth,
           fit: BoxFit.contain,
           filterQuality: FilterQuality.high,
           errorBuilder: (_, __, ___) => const Icon(

@@ -4,6 +4,7 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../core/constants.dart';
+import '../core/responsive.dart';
 import 'privacy_policy_screen.dart';
 import 'terms_of_use_screen.dart';
 
@@ -52,7 +53,8 @@ class _HowToDownloadScreenState extends State<HowToDownloadScreen> {
           style: GoogleFonts.poppins(fontWeight: FontWeight.w600),
         ),
       ),
-      body: Column(
+      body: AdaptiveBody(
+        child: Column(
         children: [
           _TabBar(
             selected: _tab,
@@ -71,6 +73,7 @@ class _HowToDownloadScreenState extends State<HowToDownloadScreen> {
           ),
         ],
       ),
+      ),
     );
   }
 
@@ -79,8 +82,8 @@ class _HowToDownloadScreenState extends State<HowToDownloadScreen> {
       return [
         _NoticeCard(
           text:
-              'Stories are not supported in ${AppConstants.appDisplayName}. '
-              'Only public posts and reels can be downloaded.',
+              'Stories can be saved when you are logged into Instagram in your device browser. '
+              'Paste a story link, tap Get Video, then Save to Gallery.',
         ),
         const SizedBox(height: 12),
         ..._copyAndShareMethods(

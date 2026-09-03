@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 import '../core/constants.dart';
+import '../core/responsive.dart';
 
 class PrivacyPolicyScreen extends StatelessWidget {
   const PrivacyPolicyScreen({super.key});
@@ -18,7 +19,8 @@ class PrivacyPolicyScreen extends StatelessWidget {
         ),
       ),
       body: SafeArea(
-        child: ListView(
+        child: AdaptiveBody(
+          child: ListView(
           padding: const EdgeInsets.fromLTRB(20, 8, 20, 32),
           children: [
             Text(
@@ -97,6 +99,7 @@ class PrivacyPolicyScreen extends StatelessWidget {
                   'If you have questions about this Privacy Policy, contact us at support@dlreels.com.',
             ),
           ],
+        ),
         ),
       ),
     );

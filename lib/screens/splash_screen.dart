@@ -4,6 +4,7 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:lottie/lottie.dart';
 
 import '../core/constants.dart';
+import '../core/responsive.dart';
 import 'main_shell.dart';
 
 class SplashScreen extends StatefulWidget {
@@ -58,7 +59,9 @@ class _SplashScreenState extends State<SplashScreen>
     return Scaffold(
       backgroundColor: AppColors.splashBackground,
       body: SafeArea(
-        child: Padding(
+        child: AdaptiveBody(
+          maxWidth: 560,
+          child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 32),
           child: Column(
             children: [
@@ -135,11 +138,16 @@ class _SplashScreenState extends State<SplashScreen>
                     ),
                   ),
                   const SizedBox(width: 10),
-                  Text(
-                    AppConstants.appDisplayName,
-                    style: GoogleFonts.pacifico(
-                      fontSize: 22,
-                      color: Colors.black,
+                  Flexible(
+                    child: Text(
+                      AppConstants.appDisplayName,
+                      maxLines: 2,
+                      textAlign: TextAlign.center,
+                      overflow: TextOverflow.ellipsis,
+                      style: GoogleFonts.pacifico(
+                        fontSize: 18,
+                        color: Colors.black,
+                      ),
                     ),
                   ),
                 ],
@@ -147,6 +155,7 @@ class _SplashScreenState extends State<SplashScreen>
               const SizedBox(height: 32),
             ],
           ),
+        ),
         ),
       ),
     );

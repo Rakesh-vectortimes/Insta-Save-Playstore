@@ -8,6 +8,7 @@ import 'package:share_plus/share_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../core/constants.dart';
+import '../core/responsive.dart';
 import '../models/download_item.dart';
 import '../services/download_history_service.dart';
 
@@ -29,6 +30,9 @@ Future<void> showMediaOptionsSheet({
   return showModalBottomSheet<void>(
     context: context,
     backgroundColor: AppColors.darkSurface,
+    constraints: BoxConstraints(
+      maxWidth: AppBreakpoints.isTablet(context) ? 560 : double.infinity,
+    ),
     shape: const RoundedRectangleBorder(
       borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
     ),

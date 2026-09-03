@@ -16,9 +16,9 @@ subprojects {
 // Legacy Flutter Gradle plugin compatibility for third-party Android plugins.
 subprojects { subproject ->
     subproject.ext.flutter = [
-        compileSdkVersion: 35,
+        compileSdkVersion: 36,
         minSdkVersion: 24,
-        targetSdkVersion: 35,
+        targetSdkVersion: 36,
         ndkVersion: "25.1.8937393",
     ]
 }

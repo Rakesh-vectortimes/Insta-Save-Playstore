@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../core/api_client.dart';
+import '../core/responsive.dart';
 import '../models/post_result.dart';
 import '../models/reel_result.dart';
 import '../services/download_service.dart';
@@ -171,7 +172,9 @@ class _ResultScreenState extends State<ResultScreen> {
         title: Text(widget.isReel ? 'Reel' : 'Post'),
       ),
       body: SafeArea(
-        child: SingleChildScrollView(
+        child: AdaptiveBody(
+          maxWidth: 720,
+          child: SingleChildScrollView(
           padding: const EdgeInsets.all(20),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -228,6 +231,7 @@ class _ResultScreenState extends State<ResultScreen> {
               ),
             ],
           ),
+        ),
         ),
       ),
     );

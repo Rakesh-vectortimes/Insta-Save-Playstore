@@ -12,6 +12,8 @@ class AppLogo extends StatelessWidget {
   Widget build(BuildContext context) {
     return Text(
       AppConstants.appDisplayName,
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
       style: GoogleFonts.pacifico(
         fontSize: fontSize,
         color: AppColors.textPrimary,
@@ -38,8 +40,9 @@ class AppTopBar extends StatelessWidget {
       padding: const EdgeInsets.fromLTRB(16, 12, 8, 8),
       child: Row(
         children: [
-          const AppLogo(),
-          const Spacer(),
+          const Expanded(
+            child: AppLogo(fontSize: 18),
+          ),
           if (trailing != null) ...trailing!,
           IconButton(
             onPressed: onInstagramTap ??

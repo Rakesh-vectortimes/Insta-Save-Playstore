@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/api_client.dart';
 import '../core/constants.dart';
+import '../core/responsive.dart';
 import '../models/carousel_item.dart';
 import '../models/download_item.dart';
 import '../models/post_result.dart';
@@ -226,7 +227,8 @@ class _CarouselScreenState extends ConsumerState<CarouselScreen> {
         title: const Text('Carousel'),
       ),
       body: SafeArea(
-        child: Column(
+        child: AdaptiveBody(
+          child: Column(
           children: [
             Padding(
               padding: const EdgeInsets.fromLTRB(20, 12, 20, 8),
@@ -278,10 +280,10 @@ class _CarouselScreenState extends ConsumerState<CarouselScreen> {
                       ),
                     )
                   : GridView.builder(
-                      padding: const EdgeInsets.fromLTRB(20, 4, 20, 12),
+                      padding: AppBreakpoints.pagePadding(context),
                       gridDelegate:
-                          const SliverGridDelegateWithFixedCrossAxisCount(
-                        crossAxisCount: 2,
+                          SliverGridDelegateWithFixedCrossAxisCount(
+                        crossAxisCount: AppBreakpoints.gridCount(context),
                         crossAxisSpacing: 12,
                         mainAxisSpacing: 12,
                         childAspectRatio: 0.72,
@@ -324,6 +326,7 @@ class _CarouselScreenState extends ConsumerState<CarouselScreen> {
               ),
             ),
           ],
+        ),
         ),
       ),
     );

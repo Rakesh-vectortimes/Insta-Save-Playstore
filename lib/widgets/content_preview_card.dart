@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 import '../core/constants.dart';
+import '../core/responsive.dart';
 
 class ContentPreviewCard extends StatelessWidget {
   const ContentPreviewCard({
@@ -26,16 +27,22 @@ class ContentPreviewCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        margin: const EdgeInsets.symmetric(horizontal: 16),
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(16),
-          color: AppColors.darkCard,
+    return Align(
+      alignment: Alignment.topCenter,
+      child: ConstrainedBox(
+        constraints: BoxConstraints(
+          maxWidth: AppBreakpoints.previewMaxWidth(context),
         ),
-        clipBehavior: Clip.antiAlias,
-        child: AspectRatio(
+        child: GestureDetector(
+          onTap: onTap,
+          child: Container(
+            margin: const EdgeInsets.symmetric(horizontal: 16),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(16),
+              color: AppColors.darkCard,
+            ),
+            clipBehavior: Clip.antiAlias,
+            child: AspectRatio(
           aspectRatio: 9 / 14,
           child: Stack(
             fit: StackFit.expand,
@@ -157,6 +164,8 @@ class ContentPreviewCard extends StatelessWidget {
                 ),
               ),
             ],
+          ),
+        ),
           ),
         ),
       ),

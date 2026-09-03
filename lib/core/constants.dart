@@ -3,8 +3,11 @@ import 'package:flutter/material.dart';
 class AppConstants {
   static const String apiBaseUrl = 'https://api.dlreels.com';
 
-  static const String appName = 'InstaSaver';
-  static const String appDisplayName = 'InstaSaver';
+  static const String appName = 'Video Downloader - Save Story';
+  static const String appDisplayName = 'Video Downloader - Save Story';
+
+  static const String storyLoginHint =
+      'Story downloads work when you\'re logged into Instagram in the device browser.';
 
   static const String storyNotSupportedMessage =
       'Stories require login and aren\'t supported. We only support public posts and reels.';
@@ -14,7 +17,7 @@ class AppConstants {
 
   static const String splashHeadline = 'No Login Required';
   static const String splashSubtitle =
-      'Download Reels and Posts in HD';
+      'Download Reels, Posts & Stories in HD';
 }
 
 class AppColors {

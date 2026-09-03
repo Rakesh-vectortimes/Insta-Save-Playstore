@@ -7,6 +7,7 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:share_plus/share_plus.dart';
 
 import '../core/constants.dart';
+import '../core/responsive.dart';
 import '../models/download_item.dart';
 import '../services/download_history_service.dart';
 import '../widgets/app_logo.dart';
@@ -66,6 +67,11 @@ class _DownloadsScreenState extends ConsumerState<DownloadsScreen> {
                 ),
               ],
             ),
+            Expanded(
+              child: AdaptiveBody(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
             SizedBox(
               height: 40,
               child: ListView.separated(
@@ -130,9 +136,9 @@ class _DownloadsScreenState extends ConsumerState<DownloadsScreen> {
                       ),
                     )
                   : GridView.builder(
-                      padding: const EdgeInsets.all(16),
-                      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                        crossAxisCount: 2,
+                      padding: AppBreakpoints.pagePadding(context),
+                      gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                        crossAxisCount: AppBreakpoints.gridCount(context),
                         crossAxisSpacing: 12,
                         mainAxisSpacing: 12,
                         childAspectRatio: 0.62,
@@ -158,6 +164,10 @@ class _DownloadsScreenState extends ConsumerState<DownloadsScreen> {
                         );
                       },
                     ),
+            ),
+                  ],
+                ),
+              ),
             ),
           ],
         ),
