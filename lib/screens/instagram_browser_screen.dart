@@ -165,6 +165,34 @@ class _InstagramBrowserScreenState
     if (mounted) setState(() => _loggedIn = has);
   }
 
+  Future<void> _logout() async {
+    try {
+      await CookieManager.instance().deleteAllCookies();
+    } catch (e) {
+      if (kDebugMode) debugPrint('[Browser] logout cookie clear failed: $e');
+    }
+    // Drop everything cached from the outgoing session — a stale user id or
+    // captured tray from this account must never be reused once a different
+    // account logs in on the same device.
+    _userIdCache.clear();
+    _capturedTrayPayload = null;
+    _capturedStoryUrls.clear();
+    _lastFetchedUsername = null;
+    try {
+      await _controller?.loadUrl(
+        urlRequest: URLRequest(
+          url: WebUri('https://www.instagram.com/accounts/login/'),
+        ),
+      );
+    } catch (_) {}
+    if (mounted) {
+      setState(() => _loggedIn = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Logged out of Instagram.')),
+      );
+    }
+  }
+
   Future<void> _maybeShowWhyLogin() async {
     // This dialog only explains why a login is needed — moot (and, being
     // modal, actively in the way) when a pasted story link is already
@@ -2801,6 +2829,7 @@ class _InstagramBrowserScreenState
                 await prefs.setBool(_prefsWhyLoginKey, false);
                 await _maybeShowWhyLogin();
               },
+              onLogout: _logout,
             ),
             if (_showTipBanner && !_hideBrowserForAutoFetch)
               _TipBanner(
@@ -3019,6 +3048,7 @@ class _BrowserChrome extends StatelessWidget {
     required this.onHome,
     required this.onSubmitUrl,
     required this.onWhyLogin,
+    required this.onLogout,
   });
 
   final TextEditingController urlController;
@@ -3031,6 +3061,7 @@ class _BrowserChrome extends StatelessWidget {
   final VoidCallback onHome;
   final ValueChanged<String> onSubmitUrl;
   final VoidCallback onWhyLogin;
+  final VoidCallback onLogout;
 
   @override
   Widget build(BuildContext context) {
@@ -3094,6 +3125,7 @@ class _BrowserChrome extends StatelessWidget {
             onSelected: (v) {
               if (v == 'why') onWhyLogin();
               if (v == 'home') onHome();
+              if (v == 'logout') onLogout();
             },
             itemBuilder: (_) => [
               PopupMenuItem(
@@ -3110,6 +3142,14 @@ class _BrowserChrome extends StatelessWidget {
                   style: GoogleFonts.poppins(color: AppColors.textPrimary),
                 ),
               ),
+              if (loggedIn)
+                PopupMenuItem(
+                  value: 'logout',
+                  child: Text(
+                    'Log out of Instagram',
+                    style: GoogleFonts.poppins(color: AppColors.error),
+                  ),
+                ),
               PopupMenuItem(
                 enabled: false,
                 child: Text(
