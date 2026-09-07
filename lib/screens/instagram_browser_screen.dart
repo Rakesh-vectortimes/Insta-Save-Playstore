@@ -1552,6 +1552,61 @@ class _InstagramBrowserScreenState
               }
             }
 
+            // 2.5) Every reel_ids lookup above came back empty (200/400, never
+            // a real payload) even though the story is visibly playing on
+            // screen — the usual cause is a WRONG numeric id: `id` above came
+            // from best-effort regex scraping of arbitrary <script> tags on
+            // the page (there is no cache hit and no real profile lookup was
+            // ever attempted), and a nearby unrelated id/username pair (e.g.
+            // a suggested-accounts widget) can be picked up by mistake. Only
+            // web_profile_info actually ties an id to a username server-side,
+            // so use it once, here, as a last resort before giving up — never
+            // upfront, to avoid tripping IG's rate limit on every tap.
+            if (!items.length && !cachedUserId) {
+              try {
+                const profRes = await fetch(
+                  'https://www.instagram.com/api/v1/users/web_profile_info/?username=' +
+                    encodeURIComponent(username),
+                  { credentials: 'include', headers: headers }
+                );
+                noteClaim(profRes);
+                attempts.push({ step: 'web_profile_info', status: profRes.status });
+                if (profRes.status === 429) {
+                  return { rateLimited: true, status: 429, attempts: attempts };
+                }
+                if (profRes.ok) {
+                  const profJson = await profRes.json();
+                  const confirmedId = profJson && profJson.data && profJson.data.user &&
+                    profJson.data.user.id;
+                  if (confirmedId && String(confirmedId) !== String(id)) {
+                    id = String(confirmedId);
+                    attempts.push({ step: 'profile_corrected', id: id });
+                    const retryRes = await fetch(
+                      'https://www.instagram.com/api/v1/feed/reels_media/?reel_ids=' +
+                        encodeURIComponent(id),
+                      { credentials: 'include', headers: headers }
+                    );
+                    noteClaim(retryRes);
+                    attempts.push({ step: 'get_retry', status: retryRes.status });
+                    if (retryRes.status === 429) {
+                      return { rateLimited: true, status: 429, attempts: attempts };
+                    }
+                    if (retryRes.ok) {
+                      const retryText = await retryRes.text();
+                      try {
+                        items = slimFromPayload(JSON.parse(retryText));
+                        attempts[attempts.length - 1].items = items.length;
+                      } catch (e) {
+                        attempts[attempts.length - 1].error = 'not_json';
+                      }
+                    }
+                  }
+                }
+              } catch (e) {
+                attempts.push({ step: 'web_profile_info', error: String(e) });
+              }
+            }
+
             // 3) Cached payload from while browsing this story
             if (!items.length && window.__qsStoryPayload) {
               items = slimFromPayload(window.__qsStoryPayload);
