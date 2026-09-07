@@ -45,6 +45,22 @@ class InstagramDpWebViewService {
       'Instagram 309.0.0.41.113 Android (33/13; 420dpi; 1080x2400; '
       'samsung; SM-G991B; o1s; exynos2100; en_US; 550821585)';
 
+  /// Instagram throttles by session/IP request volume regardless of login
+  /// state or which User-Agent a given request used — hitting a real 429 on
+  /// either the browser-UA or app-UA request means BOTH are blocked for the
+  /// same underlying reason. Recorded so repeated DP lookups during an
+  /// active block don't keep spending requests that will just get 429'd
+  /// again and extend it.
+  static DateTime? _rateLimitCooldownUntil;
+
+  static bool get _isRateLimitCoolingDown =>
+      _rateLimitCooldownUntil != null &&
+      DateTime.now().isBefore(_rateLimitCooldownUntil!);
+
+  static void _noteRateLimited() {
+    _rateLimitCooldownUntil = DateTime.now().add(const Duration(minutes: 2));
+  }
+
   static Future<String?> getStoredSessionId() => InstagramSession.getSessionId();
 
   /// Prefer native HTTP with WebView cookies (session HD), then WebView fallback.
@@ -52,27 +68,38 @@ class InstagramDpWebViewService {
     final clean = username.replaceAll('@', '').trim();
     if (clean.isEmpty) return null;
 
-    // 1) Native request with full Instagram cookie jar (best HD path).
-    final native = await _fetchViaNativeApi(clean);
-    if (native != null && native.isHd) {
+    DpExtractionResult? native;
+    DpExtractionResult? appApi;
+    if (_isRateLimitCoolingDown) {
       if (kDebugMode) {
         debugPrint(
-          '[DP] native HD ${native.width}x${native.height} source=${native.source}',
+          '[DP] skipping native attempts — cooling down from a recent 429 '
+          '(${_rateLimitCooldownUntil!.difference(DateTime.now()).inSeconds}s left)',
         );
       }
-      return native;
-    }
+    } else {
+      // 1) Native request with full Instagram cookie jar (best HD path).
+      native = await _fetchViaNativeApi(clean);
+      if (native != null && native.isHd) {
+        if (kDebugMode) {
+          debugPrint(
+            '[DP] native HD ${native.width}x${native.height} source=${native.source}',
+          );
+        }
+        return native;
+      }
 
-    // 1b) Same account, same endpoint shape, but posing as the native app —
-    // often returns the real, uncapped HD picture the web UA never gets.
-    final appApi = await _fetchViaAppApi(clean);
-    if (appApi != null && appApi.isHd) {
-      if (kDebugMode) {
-        debugPrint(
-          '[DP] app-UA HD ${appApi.width}x${appApi.height} source=${appApi.source}',
-        );
+      // 1b) Same account, same endpoint shape, but posing as the native app —
+      // often returns the real, uncapped HD picture the web UA never gets.
+      appApi = await _fetchViaAppApi(clean);
+      if (appApi != null && appApi.isHd) {
+        if (kDebugMode) {
+          debugPrint(
+            '[DP] app-UA HD ${appApi.width}x${appApi.height} source=${appApi.source}',
+          );
+        }
+        return appApi;
       }
-      return appApi;
     }
 
     // 2) WebView session fetch
@@ -135,6 +162,7 @@ class InstagramDpWebViewService {
         queryParameters: {'username': username},
       );
 
+      if (response.statusCode == 429) _noteRateLimited();
       if (response.statusCode != 200 || response.data == null) {
         if (kDebugMode) {
           debugPrint('[DP] native HTTP ${response.statusCode}');
@@ -181,6 +209,7 @@ class InstagramDpWebViewService {
         queryParameters: {'username': username},
       );
 
+      if (response.statusCode == 429) _noteRateLimited();
       if (response.statusCode != 200 || response.data == null) {
         if (kDebugMode) {
           debugPrint('[DP] app-UA HTTP ${response.statusCode}');
