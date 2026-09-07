@@ -737,50 +737,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                   children: [
             const RollingDisclaimer(),
             Padding(
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 6),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: OutlinedButton.icon(
-                      onPressed: () => _openInstagramBrowser(),
-                      icon: const Icon(Icons.open_in_browser, size: 18),
-                      label: Text(
-                        'Open Instagram',
-                        style: GoogleFonts.poppins(
-                          fontSize: 13,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                      style: OutlinedButton.styleFrom(
-                        foregroundColor: AppColors.textPrimary,
-                        side: const BorderSide(color: AppColors.darkBorder),
-                        padding: const EdgeInsets.symmetric(vertical: 12),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  TextButton.icon(
-                    onPressed: _openHowToDownload,
-                    icon: const Icon(Icons.help_outline, size: 16),
-                    label: Text(
-                      'How to?',
-                      style: GoogleFonts.poppins(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w500,
-                      ),
-                    ),
-                    style: TextButton.styleFrom(
-                      foregroundColor: AppColors.accent,
-                      padding: const EdgeInsets.symmetric(horizontal: 8),
-                      minimumSize: const Size(0, 32),
-                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
               child: Row(
                 children: [
                   Expanded(
@@ -831,7 +788,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                             ),
                           )
                         : Text(
-                            'Get Video',
+                            'Download',
                             style: GoogleFonts.poppins(fontWeight: FontWeight.w600),
                           ),
                   ),
