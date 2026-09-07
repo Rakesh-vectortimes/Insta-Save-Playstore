@@ -1842,6 +1842,40 @@ class _InstagramBrowserScreenState
       final result = await controller.callAsyncJavaScript(functionBody: r'''
         const out = [];
         const seen = {};
+
+        // A leftover <video>/<img> from the PREVIOUS story can still sit in
+        // the DOM (mid fade-out, or simply not yet unmounted) with a large
+        // bounding rect — a plain querySelectorAll has no way to tell it
+        // apart from the one actually on screen right now. Reject anything
+        // that isn't actually painted: hidden, transparent, or fully off the
+        // visible viewport.
+        function isVisible(el) {
+          try {
+            var cs = window.getComputedStyle(el);
+            if (!cs || cs.display === 'none' || cs.visibility === 'hidden') return false;
+            if (parseFloat(cs.opacity || '1') < 0.5) return false;
+            var r = el.getBoundingClientRect();
+            if (r.bottom <= 0 || r.right <= 0) return false;
+            if (r.top >= (window.innerHeight || 0) || r.left >= (window.innerWidth || 0)) return false;
+            return true;
+          } catch (e) { return true; }
+        }
+
+        // Strongest signal of all: whatever element is actually painted on
+        // top at the center of the screen right now.
+        var centerEl = null;
+        try {
+          centerEl = document.elementFromPoint(
+            (window.innerWidth || 0) / 2,
+            (window.innerHeight || 0) / 2
+          );
+        } catch (e) {}
+        function isOnTopAtCenter(el) {
+          if (!centerEl) return false;
+          return centerEl === el || (el.contains && el.contains(centerEl)) ||
+            (centerEl.contains && centerEl.contains(el));
+        }
+
         function add(url, type, score) {
           if (!url || typeof url !== 'string') return;
           if (url.indexOf('blob:') === 0) return;
@@ -1857,6 +1891,7 @@ class _InstagramBrowserScreenState
         }
 
         document.querySelectorAll('video').forEach(function(v) {
+          if (!isVisible(v)) return;
           var r = v.getBoundingClientRect();
           var area = Math.max(0, r.width) * Math.max(0, r.height);
           if (area < 25000 && r.width < 120) return;
@@ -1867,16 +1902,19 @@ class _InstagramBrowserScreenState
           if (!media) return;
           if (seen[media]) return;
           seen[media] = true;
+          var score = area + 2000000;
+          if (isOnTopAtCenter(v)) score += 10000000;
           out.push({
             url: media,
             type: 'video',
             poster: poster,
-            score: area + 2000000
+            score: score
           });
         });
 
         // Letterboxed landscape stories often have height < 240 — use area.
         document.querySelectorAll('img').forEach(function(img) {
+          if (!isVisible(img)) return;
           var r = img.getBoundingClientRect();
           var dw = r.width || 0;
           var dh = r.height || 0;
@@ -1886,6 +1924,7 @@ class _InstagramBrowserScreenState
           var score = area;
           if (area > 80000) score += 500000;
           if (dw >= 280) score += 200000;
+          if (isOnTopAtCenter(img)) score += 10000000;
           add(img.currentSrc || img.src || '', 'image', score);
           var ss = img.getAttribute('srcset') || '';
           if (ss) {
@@ -1896,12 +1935,13 @@ class _InstagramBrowserScreenState
         });
 
         document.querySelectorAll('[style*="background"]').forEach(function(el) {
+          if (!isVisible(el)) return;
           var r = el.getBoundingClientRect();
           var area = r.width * r.height;
           if (area < 35000) return;
           var st = el.getAttribute('style') || '';
           var m = st.match(/url\(["']?(https[^"')]+)["']?\)/i);
-          if (m) add(m[1], 'image', area);
+          if (m) add(m[1], 'image', area + (isOnTopAtCenter(el) ? 10000000 : 0));
         });
 
         // Hooked media from this story session
