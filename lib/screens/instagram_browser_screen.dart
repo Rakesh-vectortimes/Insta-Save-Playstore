@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:cached_network_image/cached_network_image.dart';
@@ -85,6 +86,16 @@ class _InstagramBrowserScreenState
     caseSensitive: false,
   ).hasMatch(widget.initialUrl);
 
+  /// While true, the raw Instagram page is covered with a loading state
+  /// instead of being shown — the WebView still loads and runs underneath
+  /// (its cookies/network activity are what the auto-fetch depends on), the
+  /// user just isn't shown Instagram's own UI flashing by first. Cleared as
+  /// soon as the auto-fetch attempt finishes (success or failure) or, if the
+  /// user isn't logged in, immediately (they need to see the real page to
+  /// log in). A hard timeout guards against ever trapping the user here.
+  late bool _hideBrowserForAutoFetch = _isDirectStoryLink;
+  Timer? _hideBrowserTimeoutTimer;
+
   static const _nonUserPaths = {
     'notifications',
     'explore',
@@ -121,12 +132,32 @@ class _InstagramBrowserScreenState
       await _refreshSessionFlag();
       await _maybeShowWhyLogin();
     });
+    if (_hideBrowserForAutoFetch) {
+      // Never trap the user on a loading screen indefinitely — if the
+      // auto-fetch hasn't revealed the page or shown the download sheet by
+      // itself well within this window, something unexpected happened
+      // (a hung page load, a WebView error) and they need to see the real
+      // page to recover manually.
+      _hideBrowserTimeoutTimer = Timer(const Duration(seconds: 20), () {
+        if (mounted && _hideBrowserForAutoFetch) {
+          setState(() => _hideBrowserForAutoFetch = false);
+        }
+      });
+    }
   }
 
   @override
   void dispose() {
+    _hideBrowserTimeoutTimer?.cancel();
     _urlController.dispose();
     super.dispose();
+  }
+
+  void _revealBrowserForAutoFetch() {
+    _hideBrowserTimeoutTimer?.cancel();
+    if (mounted && _hideBrowserForAutoFetch) {
+      setState(() => _hideBrowserForAutoFetch = false);
+    }
   }
 
   Future<void> _refreshSessionFlag() async {
@@ -135,6 +166,10 @@ class _InstagramBrowserScreenState
   }
 
   Future<void> _maybeShowWhyLogin() async {
+    // This dialog only explains why a login is needed — moot (and, being
+    // modal, actively in the way) when a pasted story link is already
+    // fetching automatically because a session already exists.
+    if (_isDirectStoryLink && _loggedIn) return;
     final prefs = await SharedPreferences.getInstance();
     final shown = prefs.getBool(_prefsWhyLoginKey) ?? false;
     if (shown || !mounted) return;
@@ -785,11 +820,22 @@ class _InstagramBrowserScreenState
   /// page with no obvious next step.
   Future<void> _maybeAutoTriggerDownload() async {
     if (!_isDirectStoryLink || _autoDownloadAttempted) return;
-    if (!_loggedIn || !_onStoryPage || _fetchingTray) return;
+    if (!_loggedIn) {
+      // Nothing to hide behind — reveal the real page so the user can log in.
+      _revealBrowserForAutoFetch();
+      return;
+    }
+    if (!_onStoryPage || _fetchingTray) return;
     _autoDownloadAttempted = true;
     await Future<void>.delayed(const Duration(milliseconds: 600));
     if (!mounted) return;
-    await _onDownloadFabPressed();
+    try {
+      await _onDownloadFabPressed();
+    } finally {
+      // Whether it succeeded (the sheet is up as a modal) or failed (a
+      // snackbar explains why), the underlying page can be shown now.
+      _revealBrowserForAutoFetch();
+    }
   }
 
   Future<void> _onDownloadFabPressed() async {
@@ -2756,7 +2802,7 @@ class _InstagramBrowserScreenState
                 await _maybeShowWhyLogin();
               },
             ),
-            if (_showTipBanner)
+            if (_showTipBanner && !_hideBrowserForAutoFetch)
               _TipBanner(
                 onHowTo: () {
                   setState(() => _showTipBanner = false);
@@ -2914,6 +2960,40 @@ class _InstagramBrowserScreenState
                         child: _DownloadFab(
                           loading: _fetchingTray,
                           onPressed: _onDownloadFabPressed,
+                        ),
+                      ),
+                    ),
+                  // Covers Instagram's own page while it loads in the
+                  // background for a pasted story link — the WebView still
+                  // needs to run underneath for its cookies/network activity,
+                  // the user just isn't shown Instagram's UI flashing by
+                  // before the download sheet opens on its own.
+                  if (_hideBrowserForAutoFetch)
+                    Positioned.fill(
+                      child: ColoredBox(
+                        color: AppColors.darkBackground,
+                        child: Center(
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const SizedBox(
+                                width: 40,
+                                height: 40,
+                                child: CircularProgressIndicator(
+                                  color: AppColors.accent,
+                                  strokeWidth: 3,
+                                ),
+                              ),
+                              const SizedBox(height: 16),
+                              Text(
+                                'Loading story…',
+                                style: GoogleFonts.poppins(
+                                  color: AppColors.textSecondary,
+                                  fontSize: 13,
+                                ),
+                              ),
+                            ],
+                          ),
                         ),
                       ),
                     ),
