@@ -64,6 +64,16 @@ class _InstagramBrowserScreenState
   /// Last username we built a tray for — used to drop stale captures on swipe.
   String? _lastFetchedUsername;
 
+  /// True when this screen was opened directly with a story link (e.g. pasted
+  /// on the home screen and routed here) rather than reached by browsing.
+  /// Used to auto-open the download sheet instead of leaving the user staring
+  /// at the raw Instagram page waiting for a manual tap on the download FAB.
+  bool _autoDownloadAttempted = false;
+  late final bool _isDirectStoryLink = RegExp(
+    r'instagram\.com/stories/',
+    caseSensitive: false,
+  ).hasMatch(widget.initialUrl);
+
   static const _nonUserPaths = {
     'notifications',
     'explore',
@@ -755,6 +765,20 @@ class _InstagramBrowserScreenState
       if (kDebugMode) debugPrint('[Browser] username resolve failed: $e');
     }
     return null;
+  }
+
+  /// Called after each page load. If the screen was opened with a story link
+  /// directly (paste-and-go from the home screen) and the user is already
+  /// logged in, skip the manual FAB tap and open the download sheet right
+  /// away — otherwise the user is left looking at the bare Instagram story
+  /// page with no obvious next step.
+  Future<void> _maybeAutoTriggerDownload() async {
+    if (!_isDirectStoryLink || _autoDownloadAttempted) return;
+    if (!_loggedIn || !_onStoryPage || _fetchingTray) return;
+    _autoDownloadAttempted = true;
+    await Future<void>.delayed(const Duration(milliseconds: 600));
+    if (!mounted) return;
+    await _onDownloadFabPressed();
   }
 
   Future<void> _onDownloadFabPressed() async {
@@ -1837,6 +1861,17 @@ class _InstagramBrowserScreenState
     }
   }
 
+  /// True only when the reel wrapper explicitly identifies [want] as its
+  /// owner. Used to drop other users' reels out of a multi-user tray payload.
+  bool _reelBelongsToUser(Map reel, String want) {
+    final user = reel['user'];
+    if (user is Map) {
+      final uname = user['username']?.toString();
+      if (uname != null) return uname.toLowerCase() == want;
+    }
+    return false;
+  }
+
   List<StoryTrayItem> _parseTrayItems(dynamic data, {String? forUsername}) {
     if (data == null) return const [];
     final items = <StoryTrayItem>[];
@@ -1928,10 +1963,17 @@ class _InstagramBrowserScreenState
       );
 
       // Prefer canonical REST trays when present.
+      // `reels_media` / `reels` can hold a WHOLE tray (one entry per followed
+      // user) when the payload was passively captured while scrolling the
+      // home feed. The username only lives on the reel wrapper, not on each
+      // story item — so it must be checked here, before descending into
+      // `items`, or another user's slides bleed into this user's sheet.
       final reelsMedia = map['reels_media'];
       if (reelsMedia is List) {
+        final requireUserMatch = want != null && reelsMedia.length > 1;
         for (final reel in reelsMedia) {
           if (reel is Map) {
+            if (requireUserMatch && !_reelBelongsToUser(reel, want)) continue;
             final list = reel['items'];
             if (list is List) {
               for (final n in list) {
@@ -1950,8 +1992,10 @@ class _InstagramBrowserScreenState
 
       final reels = map['reels'];
       if (reels is Map) {
+        final requireUserMatch = want != null && reels.length > 1;
         for (final reel in reels.values) {
           if (reel is Map) {
+            if (requireUserMatch && !_reelBelongsToUser(reel, want)) continue;
             final list = reel['items'];
             if (list is List) {
               for (final n in list) {
@@ -2633,10 +2677,11 @@ class _InstagramBrowserScreenState
                       _syncPageFlags(url?.toString());
                     },
                     onUpdateVisitedHistory:
-                        (controller, url, androidIsReload) {
+                        (controller, url, androidIsReload) async {
                       _syncPageFlags(url?.toString());
-                      _updateNav();
-                      _refreshSessionFlag();
+                      await _updateNav();
+                      await _refreshSessionFlag();
+                      await _maybeAutoTriggerDownload();
                     },
                     onLoadStop: (controller, url) async {
                       if (mounted) setState(() => _loading = false);
@@ -2646,6 +2691,7 @@ class _InstagramBrowserScreenState
                       await _refreshStoryUiFlag(controller);
                       await _installStoryCaptureHooks(controller);
                       await _hijackOpenInstagramButtons(controller);
+                      await _maybeAutoTriggerDownload();
                     },
                   ),
                   if (_onStoryPage || _loggedIn)
