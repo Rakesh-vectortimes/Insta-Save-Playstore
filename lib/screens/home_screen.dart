@@ -22,6 +22,7 @@ import '../widgets/quality_selector.dart';
 import '../widgets/rolling_disclaimer.dart';
 import 'carousel_screen.dart';
 import 'how_to_download_screen.dart';
+import 'instagram_browser_screen.dart';
 import 'privacy_policy_screen.dart';
 import 'profile_pic_screen.dart';
 import 'terms_of_use_screen.dart';
@@ -162,30 +163,19 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
       }
 
       if (detection.type == InstagramUrlType.story) {
-        setState(() => _statusMessage = 'Fetching story…');
-        final story = await api.fetchStory(detection.normalizedUrl!);
-        if (story.reel != null) {
-          final reel = story.reel!;
-          final qualities = reel.availableQualitiesForFormat('mp4');
-          setState(() {
-            _reel = reel;
-            _post = null;
-            _selectedFormat =
-                reel.formats.contains('mp4') ? 'mp4' : reel.formats.first;
-            _selectedQuality = qualities.contains(720)
-                ? 720
-                : (qualities.isNotEmpty ? qualities.last : 720);
-            _statusMessage = 'Story ready — tap Save to Gallery to finish.';
-          });
-        } else if (story.post != null) {
-          setState(() {
-            _reel = null;
-            _post = story.post;
-            _statusMessage = 'Story ready — tap Save to Gallery to finish.';
-          });
-        }
-        _scrollPreviewIntoView();
-      } else if (detection.type == InstagramUrlType.reel) {
+        // Stories: open built-in Instagram browser (no login prompt).
+        setState(() {
+          _isFetching = false;
+          _statusMessage = null;
+          _errorMessage = null;
+        });
+        await _openInstagramBrowser(
+          initialUrl: detection.normalizedUrl!,
+        );
+        return;
+      }
+
+      if (detection.type == InstagramUrlType.reel) {
         final reel = await api.fetchReel(detection.normalizedUrl!);
         final qualities = reel.availableQualitiesForFormat('mp4');
         setState(() {
@@ -227,18 +217,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
         _retryable = e.retryable;
         _statusMessage = null;
       });
-      if (e.reasonCode == 'story_requires_login' && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(e.message),
-            duration: const Duration(seconds: 5),
-            action: SnackBarAction(
-              label: 'How?',
-              onPressed: _showLoginHint,
-            ),
-          ),
-        );
-      }
     } catch (_) {
       setState(() {
         _errorMessage = 'Something went wrong. Please try again.';
@@ -250,37 +228,12 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
     }
   }
 
-  void _showLoginHint() {
-    if (!mounted) return;
-    showDialog<void>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Login required for stories'),
-        content: const Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('To download stories:'),
-            SizedBox(height: 12),
-            Text('1. Open Chrome on your phone'),
-            Text('2. Go to instagram.com'),
-            Text('3. Log into your account'),
-            Text('4. Come back to this app'),
-            Text('5. Paste the story link again'),
-            SizedBox(height: 12),
-            Text(
-              'Stories are only visible to logged-in users. '
-              'This app uses your existing browser session — it does not ask for your password.',
-              style: TextStyle(color: Colors.grey, fontSize: 12),
-            ),
-          ],
+  Future<void> _openInstagramBrowser({String? initialUrl}) async {
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => InstagramBrowserScreen(
+          initialUrl: initialUrl ?? 'https://www.instagram.com/',
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Got it'),
-          ),
-        ],
       ),
     );
   }
@@ -462,10 +415,86 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
   Future<void> _saveProfilePicture() async {
     if (_profile == null || _profile!.username.isEmpty) return;
 
+    if (_profile!.lowQuality) {
+      final choice = await showDialog<String>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: AppColors.darkSurface,
+          title: Text(
+            'Sharp DP needs login',
+            style: GoogleFonts.poppins(
+              color: AppColors.textPrimary,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          content: Text(
+            'Instagram only shared a tiny thumbnail. Soft enhance will still look soft.\n\n'
+            'For the real sharp DP: Open Instagram → Log in → come back and search this username again.',
+            style: GoogleFonts.poppins(
+              color: AppColors.textSecondary,
+              fontSize: 13,
+              height: 1.4,
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, 'enhance'),
+              child: Text(
+                'Enhance anyway',
+                style: GoogleFonts.poppins(color: AppColors.textMuted),
+              ),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, 'login'),
+              child: Text(
+                'Log in for sharp DP',
+                style: GoogleFonts.poppins(
+                  color: AppColors.accent,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+      if (!mounted) return;
+      if (choice == null) return;
+      if (choice == 'login') {
+        await _openInstagramBrowser(
+          initialUrl: 'https://www.instagram.com/accounts/login/',
+        );
+        if (!mounted) return;
+        // After returning from browser, re-fetch with session and save if sharper.
+        final username = _profile!.username;
+        _usernameController.text = username;
+        await _fetchProfilePicture();
+        if (!mounted || _profile == null) return;
+        if (!_profile!.lowQuality) {
+          await _saveProfilePictureSkippingPrompt();
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                'Still low-res after login. Tap Save → Enhance anyway, or confirm you’re logged in (home feed visible).',
+              ),
+              duration: Duration(seconds: 5),
+            ),
+          );
+        }
+        return;
+      }
+    }
+
+    await _saveProfilePictureSkippingPrompt();
+  }
+
+  Future<void> _saveProfilePictureSkippingPrompt() async {
+    if (_profile == null || _profile!.username.isEmpty) return;
+
     setState(() => _isProfileSaving = true);
     final progressNotifier = ValueNotifier<FileDownloadProgress?>(null);
-    final progressMessage = _profile!.upscaleAvailable
-        ? 'Fetching HD profile picture...'
+    final progressMessage = _profile!.lowQuality
+        ? 'Enhancing thumbnail (won’t look like real HD)...'
         : 'Downloading profile picture...';
 
     if (mounted) {
@@ -480,16 +509,21 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
       final api = ref.read(instagramApiServiceProvider);
       final download = await api.downloadProfilePicture(
         _profile!.username,
-        upscale: _profile!.upscaleAvailable ? true : null,
+        upscale: _profile!.upscaleAvailable || _profile!.lowQuality
+            ? true
+            : null,
         directUrl: _profile!.dpUrl,
-        preferDirect: _profile!.source?.startsWith('webview') == true &&
-            !(_profile!.upscaleAvailable),
+        preferDirect: (_profile!.source == 'webview_hd' ||
+                _profile!.source == 'session_hd') &&
+            !_profile!.lowQuality &&
+            !_profile!.upscaleAvailable &&
+            (_profile!.dpSize == null || _profile!.dpSize! >= 640),
         onProgress: (p) => progressNotifier.value = p,
       );
 
       final fileName = _downloadService.buildFileName(
         prefix:
-            'instasave_${_profile!.username}_dp${download.wasUpscaled ? '_hd' : ''}',
+            'instasave_${_profile!.username}_dp${download.wasUpscaled ? '_enhanced' : ''}',
         ext: 'jpg',
       );
       final result = await _downloadService.saveBytes(
@@ -505,7 +539,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
         thumbnailUrl: _profile!.dpUrl,
         sourceUrl: 'https://www.instagram.com/${_profile!.username}/',
         type: DownloadMediaType.photo,
-        quality: download.wasUpscaled ? 'Upscaled' : 'HD',
+        quality: download.wasUpscaled
+            ? 'Enhanced'
+            : (_profile!.lowQuality ? 'Low' : 'HD'),
         fileSizeBytes: result.fileSizeBytes,
         downloadedAt: DateTime.now(),
         author: _profile!.username,
@@ -521,7 +557,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
           SnackBar(
             content: Text(
               download.wasUpscaled
-                  ? 'HD profile picture saved!'
+                  ? 'Enhanced thumbnail saved (soft). Log in for sharp DP.'
                   : 'Profile picture saved!',
             ),
           ),
@@ -618,6 +654,23 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         ListTile(
+                          leading: const Icon(Icons.open_in_browser,
+                              color: AppColors.textPrimary),
+                          title: Text('Open Instagram browser',
+                              style: GoogleFonts.poppins(color: AppColors.textPrimary)),
+                          subtitle: Text(
+                            'Browse stories & tap Save',
+                            style: GoogleFonts.poppins(
+                              color: AppColors.textMuted,
+                              fontSize: 12,
+                            ),
+                          ),
+                          onTap: () {
+                            Navigator.pop(ctx);
+                            _openInstagramBrowser();
+                          },
+                        ),
+                        ListTile(
                           leading: const Icon(Icons.account_circle_outlined,
                               color: AppColors.textPrimary),
                           title: Text('Profile picture',
@@ -674,25 +727,45 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
             const RollingDisclaimer(),
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 0, 16, 6),
-              child: Align(
-                alignment: Alignment.centerRight,
-                child: TextButton.icon(
-                  onPressed: _openHowToDownload,
-                  icon: const Icon(Icons.help_outline, size: 16),
-                  label: Text(
-                    'How to download?',
-                    style: GoogleFonts.poppins(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w500,
+              child: Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: () => _openInstagramBrowser(),
+                      icon: const Icon(Icons.open_in_browser, size: 18),
+                      label: Text(
+                        'Open Instagram',
+                        style: GoogleFonts.poppins(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: AppColors.textPrimary,
+                        side: const BorderSide(color: AppColors.darkBorder),
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                      ),
                     ),
                   ),
-                  style: TextButton.styleFrom(
-                    foregroundColor: AppColors.accent,
-                    padding: const EdgeInsets.symmetric(horizontal: 8),
-                    minimumSize: const Size(0, 32),
-                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  const SizedBox(width: 8),
+                  TextButton.icon(
+                    onPressed: _openHowToDownload,
+                    icon: const Icon(Icons.help_outline, size: 16),
+                    label: Text(
+                      'How to?',
+                      style: GoogleFonts.poppins(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                    style: TextButton.styleFrom(
+                      foregroundColor: AppColors.accent,
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      minimumSize: const Size(0, 32),
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    ),
                   ),
-                ),
+                ],
               ),
             ),
             Padding(
@@ -890,10 +963,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                                   ),
                                 ),
                               ],
-                              if (_profile!.upscaleAvailable) ...[
+                              if (_profile!.lowQuality) ...[
                                 const SizedBox(height: 2),
                                 Text(
-                                  'HD upscale available',
+                                  'Low-res thumb — log in for sharp DP',
                                   style: GoogleFonts.poppins(
                                     color: AppColors.primary,
                                     fontSize: 11,
@@ -924,7 +997,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                                   ),
                                 )
                               : Text(
-                                  _profile!.upscaleAvailable ? 'HD' : 'Save',
+                                  'Save',
                                   style:
                                       GoogleFonts.poppins(fontWeight: FontWeight.w600),
                                 ),

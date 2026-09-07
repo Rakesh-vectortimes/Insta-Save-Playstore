@@ -130,7 +130,9 @@ class UrlDetector {
 
     value = value.replaceFirst(RegExp(r'^@+'), '');
     value = value.split(RegExp(r'[/?#]')).first;
-    value = value.replaceAll(RegExp(r'\s+'), '');
+    // "pcdoc nanda" → "pcdoc_nanda" (users often type spaces)
+    value = value.replaceAll(RegExp(r'\s+'), '_');
+    value = value.replaceAll(RegExp(r'_+'), '_');
     return value;
   }
 

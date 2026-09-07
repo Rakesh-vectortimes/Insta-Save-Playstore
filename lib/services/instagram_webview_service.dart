@@ -4,6 +4,8 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 
+import 'instagram_cdn_utils.dart';
+
 class WebViewExtractionResult {
   const WebViewExtractionResult({
     this.videoUrl,
@@ -30,48 +32,35 @@ class WebViewExtractionResult {
 }
 
 class InstagramWebViewService {
-  static const Duration _timeout = Duration(seconds: 20);
-
-  static bool _isCdnVideoUrl(String url) {
-    final lower = url.toLowerCase();
-    final isCdn = lower.contains('cdninstagram.com') ||
-        lower.contains('fbcdn.net') ||
-        lower.contains('instagram.f');
-    if (!isCdn) return false;
-    return lower.contains('.mp4') ||
-        lower.contains('video') ||
-        lower.contains('byterange') ||
-        lower.contains('/v/');
-  }
-
-  static bool _isCdnImageUrl(String url) {
-    final lower = url.toLowerCase();
-    final isCdn = lower.contains('cdninstagram.com') ||
-        lower.contains('fbcdn.net') ||
-        lower.contains('instagram.f');
-    if (!isCdn) return false;
-    return lower.contains('.jpg') ||
-        lower.contains('.jpeg') ||
-        lower.contains('.webp') ||
-        lower.contains('t51.') ||
-        lower.contains('e35') ||
-        lower.contains('e15');
-  }
+  static const Duration _timeout = Duration(seconds: 22);
 
   static void _captureUrl(
     String url,
     List<String> videoUrls,
     List<String> imageUrls,
   ) {
-    if (_isCdnVideoUrl(url) && !videoUrls.contains(url)) {
+    if (InstagramCdnUtils.isLikelyMp4Video(url) && !videoUrls.contains(url)) {
       videoUrls.add(url);
       if (kDebugMode) {
         final preview = url.length > 80 ? url.substring(0, 80) : url;
         debugPrint('[WebView] Captured video URL: $preview');
       }
-    } else if (_isCdnImageUrl(url) && !imageUrls.contains(url)) {
+    } else if (InstagramCdnUtils.isLikelyImage(url) &&
+        !imageUrls.contains(url)) {
       imageUrls.add(url);
     }
+  }
+
+  static bool _isLoginOrHome(String url) {
+    final lower = url.toLowerCase();
+    if (lower.contains('/accounts/login') || lower.contains('/challenge/')) {
+      return true;
+    }
+    // Bare feed home after redirect — not a media page.
+    final uri = Uri.tryParse(url);
+    if (uri == null) return false;
+    final path = uri.path.replaceAll(RegExp(r'/+$'), '');
+    return path.isEmpty || path == '' || path == '/';
   }
 
   /// Extract media from any Instagram URL using a headless WebView.
@@ -79,6 +68,7 @@ class InstagramWebViewService {
     final completer = Completer<WebViewExtractionResult?>();
     final capturedVideoUrls = <String>[];
     final capturedImageUrls = <String>[];
+    var loginOrWrongPage = false;
     Timer? timeoutTimer;
     HeadlessInAppWebView? headlessWebView;
 
@@ -89,22 +79,20 @@ class InstagramWebViewService {
     }
 
     void resolveFromCaptured() {
-      finish(
-        _buildResult(
-          capturedVideoUrls,
-          capturedImageUrls,
-        ),
-      );
+      if (loginOrWrongPage &&
+          capturedVideoUrls.isEmpty &&
+          capturedImageUrls.isEmpty) {
+        finish(null);
+        return;
+      }
+      finish(_buildResult(capturedVideoUrls, capturedImageUrls));
     }
 
     headlessWebView = HeadlessInAppWebView(
       initialUrlRequest: URLRequest(
         url: WebUri(instagramUrl),
         headers: const {
-          'User-Agent':
-              'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) '
-              'AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 '
-              'Mobile/15E148 Safari/604.1',
+          'User-Agent': InstagramCdnUtils.mobileUserAgent,
           'Accept-Language': 'en-US,en;q=0.9',
           'Accept':
               'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -124,15 +112,17 @@ class InstagramWebViewService {
         domStorageEnabled: true,
         databaseEnabled: true,
         cacheEnabled: true,
-        userAgent:
-            'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+        userAgent: InstagramCdnUtils.mobileUserAgent,
       ),
       shouldInterceptRequest: (controller, request) async {
-        _captureUrl(
-          request.url.toString(),
-          capturedVideoUrls,
-          capturedImageUrls,
-        );
+        final url = request.url.toString();
+        if (_isLoginOrHome(url) &&
+            !url.contains('/p/') &&
+            !url.contains('/reel') &&
+            !url.contains('/tv/')) {
+          // Don't mark wrong page from subresource requests.
+        }
+        _captureUrl(url, capturedVideoUrls, capturedImageUrls);
         return null;
       },
       onLoadResource: (controller, resource) async {
@@ -144,51 +134,90 @@ class InstagramWebViewService {
         if (kDebugMode) {
           debugPrint('[WebView] Page loaded: $url');
         }
+        final current = url?.toString() ?? '';
+        if (current.contains('/accounts/login') ||
+            current.contains('/challenge/')) {
+          loginOrWrongPage = true;
+          finish(null);
+          return;
+        }
 
-        await Future<void>.delayed(const Duration(milliseconds: 1500));
+        await Future<void>.delayed(const Duration(milliseconds: 1800));
+        if (completer.isCompleted) return;
 
         try {
           final jsResult = await controller.evaluateJavascript(source: '''
             (function() {
               try {
-                const video = document.querySelector('video');
-                if (video && video.src && (video.src.includes('cdninstagram') || video.src.includes('fbcdn'))) {
-                  return JSON.stringify({
-                    type: 'video',
-                    url: video.src,
-                    poster: video.poster || ''
-                  });
+                function unescapeIg(u) {
+                  return (u || '').replace(/\\\\u0026/g, '&').replace(/\\\\\\//g, '/');
                 }
 
-                const sources = document.querySelectorAll('video source');
-                for (const s of sources) {
-                  if (s.src && (s.src.includes('cdninstagram') || s.src.includes('fbcdn'))) {
-                    return JSON.stringify({ type: 'video', url: s.src });
+                // Prefer video element with real CDN src.
+                const video = document.querySelector('video');
+                if (video) {
+                  let src = video.currentSrc || video.src || '';
+                  if (!src) {
+                    const s = video.querySelector('source');
+                    if (s) src = s.src || '';
+                  }
+                  if (src && (src.indexOf('cdninstagram') !== -1 || src.indexOf('fbcdn') !== -1) &&
+                      src.indexOf('.mp4') !== -1) {
+                    return JSON.stringify({
+                      type: 'video',
+                      url: src,
+                      poster: video.poster || ''
+                    });
                   }
                 }
 
+                // Parse embedded JSON for video_url / video_versions / carousel.
                 const scripts = document.querySelectorAll('script');
+                let bestVideo = null;
+                let carousel = [];
                 for (const script of scripts) {
                   const text = script.textContent || '';
-                  if (text.includes('video_url') || text.includes('video_versions')) {
-                    const videoMatch = text.match(/"video_url"\\s*:\\s*"([^"]+)"/);
-                    if (videoMatch && videoMatch[1]) {
-                      return JSON.stringify({
-                        type: 'video',
-                        url: videoMatch[1].replace(/\\u0026/g, '&').replace(/\\//g, '/')
-                      });
+                  if (text.length < 40) continue;
+
+                  const videoMatch = text.match(/"video_url"\\s*:\\s*"([^"]+)"/);
+                  if (videoMatch && videoMatch[1]) {
+                    bestVideo = unescapeIg(videoMatch[1]);
+                  }
+
+                  const versions = text.match(/"url"\\s*:\\s*"(https:[^"]+\\\\/v\\\\/t50[^"]+\\.mp4[^"]*)"/);
+                  if (versions && versions[1]) {
+                    bestVideo = unescapeIg(versions[1]);
+                  }
+
+                  // Sidecar carousel display_url entries
+                  const displayMatches = text.matchAll(/"display_url"\\s*:\\s*"([^"]+)"/g);
+                  for (const m of displayMatches) {
+                    const u = unescapeIg(m[1]);
+                    if (u.indexOf('cdninstagram') !== -1 || u.indexOf('fbcdn') !== -1) {
+                      if (carousel.indexOf(u) === -1) carousel.push(u);
                     }
                   }
                 }
 
-                const imgs = document.querySelectorAll('img[src*="cdninstagram"], img[src*="fbcdn"]');
-                if (imgs.length > 0) {
-                  const urls = Array.from(imgs)
-                    .map(i => i.src)
-                    .filter(s => s && (s.includes('cdninstagram') || s.includes('fbcdn')));
-                  if (urls.length > 0) {
-                    return JSON.stringify({ type: 'images', urls: urls });
-                  }
+                if (bestVideo) {
+                  return JSON.stringify({ type: 'video', url: bestVideo, poster: '' });
+                }
+                if (carousel.length > 1) {
+                  return JSON.stringify({ type: 'carousel', urls: carousel });
+                }
+                if (carousel.length === 1) {
+                  return JSON.stringify({ type: 'images', urls: carousel });
+                }
+
+                // Article main image (single post) — avoid story tray / avatars.
+                const main = document.querySelector('article img[src*="cdninstagram"], main img[src*="cdninstagram"], article img[src*="fbcdn"]');
+                if (main && main.src && main.src.indexOf('profile_pic') === -1) {
+                  return JSON.stringify({ type: 'images', urls: [main.src] });
+                }
+
+                const og = document.querySelector('meta[property="og:image"]');
+                if (og && og.content && og.content.indexOf('instagram.com/static') === -1) {
+                  return JSON.stringify({ type: 'images', urls: [og.content] });
                 }
 
                 return null;
@@ -211,6 +240,27 @@ class InstagramWebViewService {
                 if (poster is String && poster.isNotEmpty) {
                   _captureUrl(poster, capturedVideoUrls, capturedImageUrls);
                 }
+              } else if (parsed['type'] == 'carousel' &&
+                  parsed['urls'] is List) {
+                final urls = <String>[];
+                for (final item in parsed['urls'] as List) {
+                  if (item is String) {
+                    _captureUrl(item, capturedVideoUrls, capturedImageUrls);
+                    urls.add(item);
+                  }
+                }
+                // Mark as intentional carousel via temporary multi capture.
+                if (urls.length > 1 && !completer.isCompleted) {
+                  finish(
+                    WebViewExtractionResult(
+                      carouselUrls: urls,
+                      thumbnailUrl: urls.first,
+                      source: 'webview',
+                      contentType: 'carousel',
+                    ),
+                  );
+                  return;
+                }
               } else if (parsed['type'] == 'images' && parsed['urls'] is List) {
                 for (final item in parsed['urls'] as List) {
                   if (item is String) {
@@ -232,11 +282,10 @@ class InstagramWebViewService {
         if (kDebugMode) {
           debugPrint('[WebView] Error: ${error.description}');
         }
-        if (request.isForMainFrame == true && capturedVideoUrls.isEmpty) {
-          // Keep waiting for timeout if we already captured media.
-          if (capturedImageUrls.isEmpty) {
-            finish(null);
-          }
+        if (request.isForMainFrame == true &&
+            capturedVideoUrls.isEmpty &&
+            capturedImageUrls.isEmpty) {
+          finish(null);
         }
       },
     );
@@ -250,8 +299,7 @@ class InstagramWebViewService {
 
     try {
       await headlessWebView.run();
-      final result = await completer.future;
-      return result;
+      return await completer.future;
     } catch (e) {
       if (kDebugMode) {
         debugPrint('[WebView] Failed to start: $e');
@@ -269,36 +317,25 @@ class InstagramWebViewService {
     List<String> videoUrls,
     List<String> imageUrls,
   ) {
-    if (videoUrls.isNotEmpty) {
-      final bestVideo = videoUrls.reduce(
-        (a, b) => a.length >= b.length ? a : b,
-      );
+    final bestVideo = InstagramCdnUtils.pickBestVideo(videoUrls);
+    if (bestVideo != null) {
+      final thumb = InstagramCdnUtils.pickBestImage(imageUrls);
       return WebViewExtractionResult(
         videoUrl: bestVideo,
-        thumbnailUrl: imageUrls.isNotEmpty ? imageUrls.first : null,
+        thumbnailUrl: thumb,
         source: 'webview',
         contentType: 'video',
       );
     }
 
-    if (imageUrls.isEmpty) return null;
+    final bestImage = InstagramCdnUtils.pickBestImage(imageUrls);
+    if (bestImage == null) return null;
 
-    // Prefer larger looking image URLs for single-image posts.
-    final sortedImages = List<String>.from(imageUrls)
-      ..sort((a, b) => b.length.compareTo(a.length));
-
-    if (sortedImages.length > 1) {
-      return WebViewExtractionResult(
-        carouselUrls: sortedImages,
-        thumbnailUrl: sortedImages.first,
-        source: 'webview',
-        contentType: 'carousel',
-      );
-    }
-
+    // Do NOT invent carousels from arbitrary page images — that caused
+    // Instagram logo / feed noise to be treated as posts.
     return WebViewExtractionResult(
-      imageUrl: sortedImages.first,
-      thumbnailUrl: sortedImages.first,
+      imageUrl: bestImage,
+      thumbnailUrl: bestImage,
       source: 'webview',
       contentType: 'image',
     );

@@ -7,7 +7,7 @@ class AppConstants {
   static const String appDisplayName = 'Video Downloader - Save Story';
 
   static const String storyLoginHint =
-      'Story downloads work when you\'re logged into Instagram in the device browser.';
+      'For stories, open Instagram in the app browser, view the story, then tap Save.';
 
   static const String storyNotSupportedMessage =
       'Stories require login and aren\'t supported. We only support public posts and reels.';

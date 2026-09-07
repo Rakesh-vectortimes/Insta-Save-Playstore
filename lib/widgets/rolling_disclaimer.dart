@@ -25,7 +25,7 @@ class _RollingDisclaimerState extends State<RollingDisclaimer>
 
   static const _messages = [
     'Only media from public accounts can be downloaded',
-    'Stories work if you are logged into Instagram in the browser',
+    'For stories: Open Instagram, log in once, tap the pink download button',
     'Respect copyright — use downloads for personal use only',
   ];
 

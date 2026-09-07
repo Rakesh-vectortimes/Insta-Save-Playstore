@@ -82,8 +82,7 @@ class _HowToDownloadScreenState extends State<HowToDownloadScreen> {
       return [
         _NoticeCard(
           text:
-              'Stories can be saved when you are logged into Instagram in your device browser. '
-              'Paste a story link, tap Get Video, then Save to Gallery.',
+              'For stories: Open Instagram → log in once on Instagram’s site (we never store your password) → open a story → tap the pink download button → select stories to save.',
         ),
         const SizedBox(height: 12),
         ..._copyAndShareMethods(

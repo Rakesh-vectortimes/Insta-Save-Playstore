@@ -9,6 +9,7 @@ import 'package:permission_handler/permission_handler.dart';
 import '../core/api_client.dart';
 import '../core/constants.dart';
 import '../models/download_item.dart';
+import 'instagram_cdn_utils.dart';
 
 enum MediaSaveType { image, video, audio, zip, other }
 
@@ -64,6 +65,7 @@ class DownloadService {
     required String url,
     required String fileName,
     required MediaSaveType saveType,
+    Map<String, String>? extraHeaders,
     void Function(FileDownloadProgress progress)? onProgress,
   }) async {
     final hasPermission = await requestPermission(saveType);
@@ -75,15 +77,71 @@ class DownloadService {
     final appDir = await _getAppDownloadsDirectory();
     final destPath = '${appDir.path}/$fileName';
 
-    await _dio.download(
-      resolvedUrl,
-      destPath,
-      onReceiveProgress: (received, total) {
-        onProgress?.call(FileDownloadProgress(received: received, total: total));
-      },
-    );
+    final headers = <String, dynamic>{
+      ...InstagramCdnUtils.downloadHeaders,
+      if (extraHeaders != null) ...extraHeaders,
+    };
+    if (InstagramCdnUtils.isInstagramCdn(resolvedUrl)) {
+      headers['Referer'] ??= 'https://www.instagram.com/';
+      headers['Origin'] ??= 'https://www.instagram.com';
+    }
 
-    final fileSize = await File(destPath).length();
+    try {
+      await _dio.download(
+        resolvedUrl,
+        destPath,
+        options: Options(
+          headers: headers,
+          followRedirects: true,
+          validateStatus: (s) => s != null && s >= 200 && s < 400,
+        ),
+        onReceiveProgress: (received, total) {
+          onProgress?.call(
+            FileDownloadProgress(received: received, total: total),
+          );
+        },
+      );
+    } on DioException catch (e) {
+      final code = e.response?.statusCode;
+      if (code == 403 || code == 401) {
+        throw Exception(
+          'Instagram blocked the file (login session required). '
+          'Open Instagram in the app, stay logged in, then try again.',
+        );
+      }
+      throw Exception(
+        'Download failed${code != null ? ' ($code)' : ''}. Please try again.',
+      );
+    }
+
+    final file = File(destPath);
+    final fileSize = await file.length();
+    if (fileSize < 1024) {
+      try {
+        await file.delete();
+      } catch (_) {}
+      throw Exception('Download failed — file was empty or blocked.');
+    }
+
+    final probe = await file.openRead(0, 64).first;
+    if (InstagramCdnUtils.looksLikeHtml(probe)) {
+      try {
+        await file.delete();
+      } catch (_) {}
+      throw Exception(
+        'Download failed — Instagram blocked the media URL. Try again.',
+      );
+    }
+    if (saveType == MediaSaveType.video &&
+        !InstagramCdnUtils.looksLikeMp4(probe)) {
+      try {
+        await file.delete();
+      } catch (_) {}
+      throw Exception(
+        'Downloaded file is not a playable video. Try Get Video again.',
+      );
+    }
+
     var gallerySaved = false;
 
     switch (saveType) {

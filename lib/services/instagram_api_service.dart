@@ -10,9 +10,12 @@ import '../models/post_result.dart';
 import '../models/profile_result.dart';
 import '../models/reel_result.dart';
 import 'download_service.dart';
+import 'image_upscale.dart';
 import 'instagram_cache_service.dart';
+import 'instagram_cdn_utils.dart';
 import 'instagram_direct_service.dart';
 import 'instagram_dp_webview_service.dart';
+import 'instagram_session.dart';
 import 'instagram_story_service.dart';
 import 'instagram_webview_service.dart';
 
@@ -37,7 +40,9 @@ class InstagramApiService {
       final cached = await _cache.checkCache(url);
       if (cached != null) {
         final reel = _cache.reelFromCache(cached, url);
-        if (reel != null && reel.downloadUrl.isNotEmpty) {
+        if (reel != null &&
+            reel.downloadUrl.isNotEmpty &&
+            InstagramCdnUtils.isLikelyMp4Video(reel.downloadUrl)) {
           _log('Cache hit for reel');
           return reel;
         }
@@ -46,7 +51,19 @@ class InstagramApiService {
       _log('Cache check failed: $e');
     }
 
-    // 2) WebView extraction (device IP / session)
+    // 2) On-device embed parse (reliable progressive MP4)
+    try {
+      final result = await _direct.fetchReel(url);
+      if (InstagramCdnUtils.isLikelyMp4Video(result.downloadUrl)) {
+        _log('Embed extracted reel on-device');
+        unawaited(_cache.saveCache(url, _cache.reelToCachePayload(result)));
+        return result;
+      }
+    } catch (e) {
+      _log('On-device reel failed: $e');
+    }
+
+    // 3) WebView extraction (device IP / session)
     try {
       _log('Trying WebView extraction for reel');
       final web = await InstagramWebViewService.extract(url);
@@ -60,15 +77,6 @@ class InstagramApiService {
       _log('WebView reel failed: $e');
     }
 
-    // 3) Existing on-device embed parse
-    try {
-      final result = await _direct.fetchReel(url);
-      _log('Embed extracted reel on-device');
-      return result;
-    } catch (e) {
-      _log('On-device reel failed, using API fallback: $e');
-    }
-
     // 4) API fallback
     return _fetchReelFromApi(url);
   }
@@ -78,7 +86,7 @@ class InstagramApiService {
       final cached = await _cache.checkCache(url);
       if (cached != null) {
         final post = _cache.postFromCache(cached);
-        if (post != null) {
+        if (post != null && _isUsablePost(post)) {
           _log('Cache hit for post');
           return post;
         }
@@ -87,11 +95,34 @@ class InstagramApiService {
       _log('Cache check failed: $e');
     }
 
+    // Embed first — accurate for public posts/carousels (avoids WebView noise).
+    try {
+      final result = await _direct.fetchPost(url);
+      if (_isUsablePost(result)) {
+        _log('Embed extracted post on-device');
+        unawaited(_cache.saveCache(url, _cache.postToCachePayload(result)));
+        return result;
+      }
+    } catch (e) {
+      _log('On-device post failed: $e');
+    }
+
+    // API — best for multi-item carousels.
+    try {
+      final apiPost = await _fetchPostFromApi(url);
+      if (_isUsablePost(apiPost)) {
+        unawaited(_cache.saveCache(url, _cache.postToCachePayload(apiPost)));
+        return apiPost;
+      }
+    } catch (e) {
+      _log('API post failed: $e');
+    }
+
     try {
       _log('Trying WebView extraction for post');
       final web = await InstagramWebViewService.extract(url);
       final post = _postFromWebView(web);
-      if (post != null) {
+      if (post != null && _isUsablePost(post)) {
         _log('WebView success for post');
         unawaited(_cache.saveCache(url, _cache.postToCachePayload(post)));
         return post;
@@ -100,42 +131,23 @@ class InstagramApiService {
       _log('WebView post failed: $e');
     }
 
-    try {
-      final result = await _direct.fetchPost(url);
-      _log('Embed extracted post on-device');
-      return result;
-    } catch (e) {
-      _log('On-device post failed, using API fallback: $e');
-    }
-
-    return _fetchPostFromApi(url);
+    throw ApiException(
+      message: 'Could not extract this post. It may be private or unavailable.',
+      retryable: true,
+    );
   }
 
   /// Stories via dedicated WebView interceptor (needs IG session).
   Future<({ReelResult? reel, PostResult? post})> fetchStory(String url) async {
-    try {
-      final cached = await _cache.checkCache(url);
-      if (cached != null) {
-        final reel = _cache.reelFromCache(cached, url);
-        if (reel != null && reel.downloadUrl.isNotEmpty) {
-          _log('Cache hit for story');
-          return (reel: reel, post: null);
-        }
-        final post = _cache.postFromCache(cached);
-        if (post != null) {
-          return (reel: null, post: post);
-        }
-      }
-    } catch (_) {}
-
+    // Skip cache for stories — stale/wrong tray thumbs were being reused.
     _log('Trying dedicated story WebView');
     final result = await InstagramStoryService.extractStory(url);
 
     if (result?.requiresLogin == true) {
       throw ApiException(
         message:
-            'Story downloads need Instagram login. '
-            'Log into Instagram in your browser, then try again.',
+            'Story downloads need Instagram login inside the app. '
+            'Tap Log in, sign in, then try the story link again.',
         retryable: false,
         reasonCode: 'story_requires_login',
         scopeLimited: true,
@@ -150,16 +162,16 @@ class InstagramApiService {
       );
     }
 
-    if (result!.mediaType == 'image') {
+    final mediaUrl = result!.mediaUrl!;
+    if (result.mediaType == 'image') {
       final post = PostResult(
         type: PostType.image,
         title: 'Instagram Story',
         author: '',
-        url: result.mediaUrl,
-        thumbnail: result.thumbnailUrl ?? result.mediaUrl,
+        url: mediaUrl,
+        thumbnail: result.thumbnailUrl ?? mediaUrl,
         ext: 'jpg',
       );
-      unawaited(_cache.saveCache(url, _cache.postToCachePayload(post)));
       return (reel: null, post: post);
     }
 
@@ -170,18 +182,17 @@ class InstagramApiService {
       source: 'webview',
       formats: const ['mp4'],
       qualities: const ['720p'],
-      downloadUrl: result.mediaUrl!,
+      downloadUrl: mediaUrl,
       downloads: [
         ReelDownloadOption(
           format: 'mp4',
           quality: 720,
           label: '720p',
-          url: result.mediaUrl!,
+          url: mediaUrl,
         ),
       ],
       originalUrl: url,
     );
-    unawaited(_cache.saveCache(url, _cache.reelToCachePayload(reel)));
     return (reel: reel, post: null);
   }
 
@@ -200,37 +211,50 @@ class InstagramApiService {
 
   Future<ProfileResult> fetchProfilePicture(String username) async {
     final clean = username.replaceAll('@', '').trim();
+    final sessionHeaders = await InstagramSession.apiSessionHeaders();
 
+    ProfileResult? webProfile;
     try {
       final web = await InstagramDpWebViewService.extractDp(clean);
       if (web?.dpUrl != null && web!.dpUrl!.isNotEmpty) {
-        _log('DP WebView success — isHd: ${web.isHd} source: ${web.source}');
-        return ProfileResult(
+        _log(
+          'DP WebView — isHd: ${web.isHd} '
+          '${web.width}x${web.height} source: ${web.source}',
+        );
+        webProfile = ProfileResult(
           username: clean,
           fullName: web.fullName ?? '',
           dpUrl: web.dpUrl!,
           isPrivate: false,
           followers: 0,
+          dpSize: web.width,
           lowQuality: !web.isHd,
           upscaleAvailable: !web.isHd,
           upscaleNote: web.isHd
               ? null
-              : 'Higher-resolution photo was not available. HD upscale can still run on download.',
+              : 'Only a tiny thumbnail is available. Soft enhance can’t add real detail — Open Instagram → log in once → search again for the sharp original.',
           source: web.source,
         );
+        if (web.isHd) return webProfile;
       }
     } catch (e) {
       _log('DP WebView failed: $e');
     }
 
-    _log('DP falling back to API');
+    _log(
+      'DP API fallback (session header: ${sessionHeaders.isNotEmpty})',
+    );
     try {
       final encoded = Uri.encodeComponent(clean);
       final response = await _dio.get<Map<String, dynamic>>(
         '/api/instagram/dp/$encoded',
+        options: Options(
+          headers: sessionHeaders.isEmpty ? null : sessionHeaders,
+        ),
       );
       final data = response.data;
       if (data == null) {
+        if (webProfile != null) return webProfile;
         throw ApiException(
           message:
               'Unable to retrieve the profile picture. Please check the username and try again.',
@@ -240,6 +264,7 @@ class InstagramApiService {
 
       final profile = ProfileResult.fromJson(data);
       if (profile.username.isEmpty || profile.dpUrl.isEmpty) {
+        if (webProfile != null) return webProfile;
         throw ApiException(
           message:
               'Profile could not be found. Check the username and try again.',
@@ -247,12 +272,43 @@ class InstagramApiService {
           statusCode: 404,
         );
       }
+
+      final apiLooksHd = !profile.lowQuality &&
+          (profile.dpSize == null || profile.dpSize! >= 640) &&
+          !profile.dpUrl.toLowerCase().contains('s150x150');
+
+      if (webProfile != null && webProfile.lowQuality) {
+        return ProfileResult(
+          username: profile.username.isNotEmpty ? profile.username : clean,
+          fullName: profile.fullName.isNotEmpty
+              ? profile.fullName
+              : webProfile.fullName,
+          dpUrl: profile.dpUrl,
+          isPrivate: profile.isPrivate,
+          followers: profile.followers,
+          dpSize: profile.dpSize ?? webProfile.dpSize,
+          lowQuality: !apiLooksHd,
+          upscaleAvailable:
+              profile.upscaleAvailable || !apiLooksHd || webProfile.lowQuality,
+          upscaleFactor: profile.upscaleFactor,
+          estimatedUpscaledSize: profile.estimatedUpscaledSize,
+          upscaleNote: apiLooksHd
+              ? null
+              : (profile.upscaleNote ?? webProfile.upscaleNote),
+          source: sessionHeaders.isNotEmpty
+              ? (profile.source ?? 'api_session')
+              : (profile.source ?? 'api'),
+        );
+      }
       return profile;
     } on ApiException {
+      if (webProfile != null) return webProfile;
       rethrow;
     } on DioException catch (e) {
+      if (webProfile != null) return webProfile;
       throw ApiException.fromDioException(e, feature: 'dp');
     } catch (_) {
+      if (webProfile != null) return webProfile;
       throw ApiException(
         message:
             'Unable to retrieve the profile picture. Please check the username and try again.',
@@ -268,20 +324,24 @@ class InstagramApiService {
     bool preferDirect = false,
     void Function(FileDownloadProgress progress)? onProgress,
   }) async {
+    final wantUpscale = upscale == true;
+    final urlLooksTiny = directUrl != null &&
+        RegExp(r's(100|150|240|320)x\1', caseSensitive: false)
+            .hasMatch(directUrl);
+
     final canUseDirect = directUrl != null &&
         directUrl.startsWith('http') &&
-        upscale != true &&
-        (preferDirect || directUrl.isNotEmpty);
+        !wantUpscale &&
+        !urlLooksTiny &&
+        preferDirect;
     if (canUseDirect) {
       try {
         final response = await Dio().get<List<int>>(
           directUrl,
           options: Options(
             responseType: ResponseType.bytes,
-            headers: const {
-              'User-Agent':
-                  'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
-              'Referer': 'https://www.instagram.com/',
+            headers: {
+              ...InstagramCdnUtils.downloadHeaders,
             },
           ),
           onReceiveProgress: (received, total) {
@@ -290,11 +350,12 @@ class InstagramApiService {
             );
           },
         );
-        final bytes = response.data ?? [];
+        var bytes = response.data ?? [];
         if (bytes.isNotEmpty) {
+          final enhanced = await _ensureDpQuality(bytes, forceUpscale: false);
           return ProfilePictureDownloadResult(
-            bytes: bytes,
-            wasUpscaled: false,
+            bytes: enhanced.bytes,
+            wasUpscaled: enhanced.wasUpscaled,
           );
         }
       } catch (e) {
@@ -303,16 +364,20 @@ class InstagramApiService {
     }
 
     try {
-      final queryParams = <String, dynamic>{};
-      if (upscale != null) {
-        queryParams['upscale'] = upscale ? 1 : 0;
-      }
+      final queryParams = <String, dynamic>{
+        // Always ask server for upscale when we know source is tiny.
+        'upscale': (wantUpscale || urlLooksTiny) ? 1 : 0,
+      };
 
+      final sessionHeaders = await InstagramSession.apiSessionHeaders();
       final encoded = Uri.encodeComponent(username);
       final response = await _dio.get<List<int>>(
         '/api/instagram/dp/$encoded/download',
-        queryParameters: queryParams.isEmpty ? null : queryParams,
-        options: Options(responseType: ResponseType.bytes),
+        queryParameters: queryParams,
+        options: Options(
+          responseType: ResponseType.bytes,
+          headers: sessionHeaders.isEmpty ? null : sessionHeaders,
+        ),
         onReceiveProgress: (received, total) {
           onProgress?.call(
             FileDownloadProgress(received: received, total: total),
@@ -320,7 +385,21 @@ class InstagramApiService {
         },
       );
 
-      final bytes = response.data ?? [];
+      var bytes = response.data ?? [];
+      if (bytes.isEmpty && directUrl != null) {
+        // Fallback: pull the CDN thumb ourselves then upscale locally.
+        try {
+          final fallback = await Dio().get<List<int>>(
+            directUrl,
+            options: Options(
+              responseType: ResponseType.bytes,
+              headers: {...InstagramCdnUtils.downloadHeaders},
+            ),
+          );
+          bytes = fallback.data ?? [];
+        } catch (_) {}
+      }
+
       if (bytes.isEmpty) {
         throw ApiException(
           message:
@@ -329,17 +408,47 @@ class InstagramApiService {
         );
       }
 
-      final wasUpscaled =
+      final serverUpscaled =
           response.headers.value('x-dp-upscaled')?.toLowerCase() == 'true';
+      final enhanced = await _ensureDpQuality(
+        bytes,
+        forceUpscale: wantUpscale || urlLooksTiny,
+      );
 
       return ProfilePictureDownloadResult(
-        bytes: bytes,
-        wasUpscaled: wasUpscaled,
+        bytes: enhanced.bytes,
+        wasUpscaled: serverUpscaled || enhanced.wasUpscaled,
       );
     } on ApiException {
       rethrow;
     } on DioException catch (e) {
       throw ApiException.fromDioException(e, feature: 'dp');
+    }
+  }
+
+  Future<({List<int> bytes, bool wasUpscaled})> _ensureDpQuality(
+    List<int> bytes, {
+    required bool forceUpscale,
+  }) async {
+    // Tiny JPEG payloads (~3KB) are 100x100 thumbs — always enlarge on-device.
+    final tinyPayload = bytes.length < 12000;
+    if (!forceUpscale && !tinyPayload) {
+      return (bytes: bytes, wasUpscaled: false);
+    }
+    try {
+      final out = await ImageUpscale.upscaleJpegIfSmall(
+        bytes,
+        minEdge: 720,
+        maxEdge: 1440,
+      );
+      final changed = out.length != bytes.length;
+      if (changed) {
+        _log('DP local upscale applied (${bytes.length} → ${out.length} bytes)');
+      }
+      return (bytes: out, wasUpscaled: changed);
+    } catch (e) {
+      _log('DP local upscale failed: $e');
+      return (bytes: bytes, wasUpscaled: false);
     }
   }
 
@@ -350,50 +459,45 @@ class InstagramApiService {
   }) {
     if (web == null || !web.hasMedia) return null;
 
-    if (web.videoUrl != null && web.videoUrl!.isNotEmpty) {
-      return ReelResult(
-        title: web.title ?? titleFallback,
-        thumbnail: web.thumbnailUrl,
-        duration: null,
-        source: 'webview',
-        formats: const ['mp4'],
-        qualities: const ['720p'],
-        downloadUrl: web.videoUrl!,
-        downloads: [
-          ReelDownloadOption(
-            format: 'mp4',
-            quality: 720,
-            label: '720p',
-            url: web.videoUrl!,
-          ),
-        ],
-        originalUrl: originalUrl,
-      );
+    final videoUrl = web.videoUrl;
+    if (videoUrl == null ||
+        videoUrl.isEmpty ||
+        !InstagramCdnUtils.isLikelyMp4Video(videoUrl)) {
+      // Never treat an image / junk CDN URL as an mp4 reel.
+      return null;
     }
 
-    // Some "reels" may only expose an image fallback.
-    if (web.imageUrl != null && web.imageUrl!.isNotEmpty) {
-      return ReelResult(
-        title: web.title ?? titleFallback,
-        thumbnail: web.thumbnailUrl ?? web.imageUrl,
-        duration: null,
-        source: 'webview',
-        formats: const ['mp4'],
-        qualities: const ['720p'],
-        downloadUrl: web.imageUrl!,
-        downloads: [
-          ReelDownloadOption(
-            format: 'mp4',
-            quality: 720,
-            label: '720p',
-            url: web.imageUrl!,
-          ),
-        ],
-        originalUrl: originalUrl,
-      );
-    }
+    return ReelResult(
+      title: web.title ?? titleFallback,
+      thumbnail: web.thumbnailUrl,
+      duration: null,
+      source: 'webview',
+      formats: const ['mp4'],
+      qualities: const ['720p'],
+      downloadUrl: videoUrl,
+      downloads: [
+        ReelDownloadOption(
+          format: 'mp4',
+          quality: 720,
+          label: '720p',
+          url: videoUrl,
+        ),
+      ],
+      originalUrl: originalUrl,
+    );
+  }
 
-    return null;
+  bool _isUsablePost(PostResult post) {
+    if (post.isCarousel) {
+      return post.items.isNotEmpty &&
+          post.items.every((i) => i.url.isNotEmpty);
+    }
+    final url = post.url;
+    if (url == null || url.isEmpty) return false;
+    if (post.type == PostType.video) {
+      return InstagramCdnUtils.isLikelyMp4Video(url);
+    }
+    return InstagramCdnUtils.isInstagramCdn(url) || url.startsWith('http');
   }
 
   PostResult? _postFromWebView(WebViewExtractionResult? web) {
@@ -401,14 +505,18 @@ class InstagramApiService {
 
     if (web.contentType == 'carousel' &&
         web.carouselUrls != null &&
-        web.carouselUrls!.isNotEmpty) {
+        web.carouselUrls!.length > 1) {
       final items = <CarouselItem>[
         for (var i = 0; i < web.carouselUrls!.length; i++)
           CarouselItem(
             index: i + 1,
-            type: web.carouselUrls![i].contains('.mp4') ? 'video' : 'image',
+            type: InstagramCdnUtils.isLikelyMp4Video(web.carouselUrls![i])
+                ? 'video'
+                : 'image',
             url: web.carouselUrls![i],
-            ext: web.carouselUrls![i].contains('.mp4') ? 'mp4' : 'jpg',
+            ext: InstagramCdnUtils.isLikelyMp4Video(web.carouselUrls![i])
+                ? 'mp4'
+                : 'jpg',
             thumbnail: web.carouselUrls![i],
           ),
       ];
@@ -421,7 +529,9 @@ class InstagramApiService {
       );
     }
 
-    if (web.videoUrl != null && web.videoUrl!.isNotEmpty) {
+    if (web.videoUrl != null &&
+        web.videoUrl!.isNotEmpty &&
+        InstagramCdnUtils.isLikelyMp4Video(web.videoUrl!)) {
       return PostResult(
         type: PostType.video,
         title: web.title ?? 'Instagram Post',
@@ -432,7 +542,9 @@ class InstagramApiService {
       );
     }
 
-    if (web.imageUrl != null && web.imageUrl!.isNotEmpty) {
+    if (web.imageUrl != null &&
+        web.imageUrl!.isNotEmpty &&
+        InstagramCdnUtils.isLikelyImage(web.imageUrl!)) {
       return PostResult(
         type: PostType.image,
         title: web.title ?? 'Instagram Post',

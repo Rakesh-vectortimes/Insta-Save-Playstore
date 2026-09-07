@@ -14,6 +14,7 @@ import '../services/instagram_api_service.dart';
 import '../widgets/download_progress_dialog.dart';
 import '../widgets/error_banner.dart';
 import '../widgets/loading_indicator.dart';
+import 'instagram_browser_screen.dart';
 
 class ProfilePicScreen extends ConsumerStatefulWidget {
   const ProfilePicScreen({super.key});
@@ -96,10 +97,88 @@ class _ProfilePicScreenState extends ConsumerState<ProfilePicScreen> {
     final profile = _profile;
     if (profile == null || profile.username.isEmpty) return;
 
+    if (profile.lowQuality) {
+      final choice = await showDialog<String>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: AppColors.darkSurface,
+          title: const Text(
+            'Sharp DP needs login',
+            style: TextStyle(
+              color: AppColors.textPrimary,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          content: const Text(
+            'Instagram only shared a tiny thumbnail. Soft enhance will still look soft.\n\n'
+            'For the real sharp DP: log in once in the in-app browser, then search again.',
+            style: TextStyle(
+              color: AppColors.textSecondary,
+              fontSize: 13,
+              height: 1.4,
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, 'enhance'),
+              child: const Text(
+                'Enhance anyway',
+                style: TextStyle(color: AppColors.textMuted),
+              ),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, 'login'),
+              child: const Text(
+                'Log in for sharp DP',
+                style: TextStyle(
+                  color: AppColors.accent,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+      if (!mounted) return;
+      if (choice == null) return;
+      if (choice == 'login') {
+        await Navigator.of(context).push(
+          MaterialPageRoute(
+            builder: (_) => const InstagramBrowserScreen(
+              initialUrl: 'https://www.instagram.com/accounts/login/',
+            ),
+          ),
+        );
+        if (!mounted) return;
+        await _search();
+        if (!mounted || _profile == null) return;
+        if (!_profile!.lowQuality) {
+          await _downloadAfterLogin();
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                'Still low-res after login. Tap download → Enhance anyway, or confirm home feed is visible in the browser.',
+              ),
+              duration: Duration(seconds: 5),
+            ),
+          );
+        }
+        return;
+      }
+    }
+
+    await _downloadAfterLogin();
+  }
+
+  Future<void> _downloadAfterLogin() async {
+    final profile = _profile;
+    if (profile == null || profile.username.isEmpty) return;
+
     setState(() => _isDownloading = true);
     final progressNotifier = ValueNotifier<FileDownloadProgress?>(null);
-    final progressMessage = profile.upscaleAvailable
-        ? 'Fetching HD profile picture...'
+    final progressMessage = profile.lowQuality
+        ? 'Enhancing thumbnail (won’t look like real HD)...'
         : 'Downloading profile picture...';
 
     if (mounted) {
@@ -114,15 +193,19 @@ class _ProfilePicScreenState extends ConsumerState<ProfilePicScreen> {
       final api = ref.read(instagramApiServiceProvider);
       final download = await api.downloadProfilePicture(
         profile.username,
-        upscale: profile.upscaleAvailable ? true : null,
+        upscale: profile.upscaleAvailable || profile.lowQuality ? true : null,
         directUrl: profile.dpUrl,
-        preferDirect: profile.source?.startsWith('webview') == true &&
-            !profile.upscaleAvailable,
+        preferDirect: (profile.source == 'webview_hd' ||
+                profile.source == 'session_hd') &&
+            !profile.lowQuality &&
+            !profile.upscaleAvailable &&
+            (profile.dpSize == null || profile.dpSize! >= 640),
         onProgress: (p) => progressNotifier.value = p,
       );
 
       final fileName = _downloadService.buildFileName(
-        prefix: 'instasave_${profile.username}_dp${download.wasUpscaled ? '_hd' : ''}',
+        prefix:
+            'instasave_${profile.username}_dp${download.wasUpscaled ? '_enhanced' : ''}',
         ext: 'jpg',
       );
 
@@ -139,7 +222,9 @@ class _ProfilePicScreenState extends ConsumerState<ProfilePicScreen> {
         thumbnailUrl: profile.dpUrl,
         sourceUrl: 'https://www.instagram.com/${profile.username}/',
         type: DownloadMediaType.photo,
-        quality: download.wasUpscaled ? 'Upscaled' : 'HD',
+        quality: download.wasUpscaled
+            ? 'Enhanced'
+            : (profile.lowQuality ? 'Low' : 'HD'),
         fileSizeBytes: result.fileSizeBytes,
         downloadedAt: DateTime.now(),
         author: profile.username,
@@ -153,7 +238,7 @@ class _ProfilePicScreenState extends ConsumerState<ProfilePicScreen> {
           SnackBar(
             content: Text(
               download.wasUpscaled
-                  ? 'HD profile picture saved!'
+                  ? 'Enhanced thumbnail saved (soft). Log in for sharp DP.'
                   : 'Profile picture saved!',
             ),
           ),
@@ -308,8 +393,8 @@ class _ProfilePicScreenState extends ConsumerState<ProfilePicScreen> {
                   onPressed: _isDownloading ? null : _download,
                   icon: const Icon(Icons.download_rounded),
                   label: Text(
-                    _profile!.upscaleAvailable
-                        ? 'Download HD profile picture'
+                    _profile!.lowQuality
+                        ? 'Save (soft enhance)'
                         : 'Download profile picture',
                   ),
                 ),

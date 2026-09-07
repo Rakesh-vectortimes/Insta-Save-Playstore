@@ -1,7 +1,7 @@
 name: instasave
 description: Download public Instagram reels, posts, and profile pictures.
 publish_to: 'none'
-version: 1.0.3+4
+version: 1.0.4+5
 
 environment:
   sdk: ^3.5.0
@@ -26,6 +26,7 @@ dependencies:
   intl: ^0.19.0
   video_player: ^2.9.2
   flutter_inappwebview: ^6.1.5
+  image: ^4.3.0
 
 dev_dependencies:
   flutter_test:
