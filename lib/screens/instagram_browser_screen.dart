@@ -1374,7 +1374,32 @@ class _InstagramBrowserScreenState
               }
             } catch (e) {}
           }
+          // A real 429 means IG has already flagged this session — hammering
+          // it again on the very next story (up to 7 requests per attempt:
+          // 3 POST bodies, 3 GET fallbacks, 1 profile lookup) only extends
+          // the block. Remember it and back off for a cooldown window instead
+          // of spending the whole request budget again just to get 429'd.
+          function noteRateLimited() {
+            try {
+              sessionStorage.setItem('qs_ig_429_until', String(Date.now() + 120000));
+            } catch (e) {}
+          }
+          function rateLimitCooldownRemaining() {
+            try {
+              var until = parseInt(sessionStorage.getItem('qs_ig_429_until') || '0', 10);
+              return until > Date.now() ? until - Date.now() : 0;
+            } catch (e) { return 0; }
+          }
           try {
+            var cooldownMs = rateLimitCooldownRemaining();
+            if (cooldownMs > 0) {
+              return {
+                rateLimited: true,
+                cooldown: true,
+                status: 429,
+                attempts: [{ step: 'cooldown', remainingMs: cooldownMs }]
+              };
+            }
             try {
               var storedClaim = sessionStorage.getItem('qs_ig_www_claim');
               if (storedClaim) headers['X-IG-WWW-Claim'] = storedClaim;
@@ -1497,6 +1522,7 @@ class _InstagramBrowserScreenState
                   claim: headers['X-IG-WWW-Claim']
                 });
                 if (postRes.status === 429) {
+                  noteRateLimited();
                   return { rateLimited: true, status: 429, attempts: attempts };
                 }
                 if (postRes.ok) {
@@ -1532,6 +1558,7 @@ class _InstagramBrowserScreenState
                     claim: headers['X-IG-WWW-Claim']
                   });
                   if (reelsRes.status === 429) {
+                    noteRateLimited();
                     return { rateLimited: true, status: 429, attempts: attempts };
                   }
                   if (reelsRes.status === 401 || reelsRes.status === 403) {
@@ -1578,6 +1605,7 @@ class _InstagramBrowserScreenState
                 noteClaim(profRes);
                 attempts.push({ step: 'web_profile_info', status: profRes.status });
                 if (profRes.status === 429) {
+                  noteRateLimited();
                   return { rateLimited: true, status: 429, attempts: attempts };
                 }
                 if (profRes.ok) {
@@ -1595,6 +1623,7 @@ class _InstagramBrowserScreenState
                     noteClaim(retryRes);
                     attempts.push({ step: 'get_retry', status: retryRes.status });
                     if (retryRes.status === 429) {
+                      noteRateLimited();
                       return { rateLimited: true, status: 429, attempts: attempts };
                     }
                     if (retryRes.ok) {
@@ -1669,16 +1698,20 @@ class _InstagramBrowserScreenState
       }
 
       if (decoded['rateLimited'] == true) {
+        final onCooldown = decoded['cooldown'] == true;
         _lastTrayDebug =
-            'rateLimited status=${decoded['status']} attempts=${decoded['attempts']}';
+            'rateLimited cooldown=$onCooldown status=${decoded['status']} '
+            'attempts=${decoded['attempts']}';
         print('[Browser] tray $_lastTrayDebug');
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
+            SnackBar(
               content: Text(
-                'Instagram is rate-limiting requests. Wait a minute before trying again.',
+                onCooldown
+                    ? 'Instagram rate-limited this session recently. Waiting it out — try again in a minute or two.'
+                    : 'Instagram is rate-limiting requests. Wait a minute before trying again.',
               ),
-              duration: Duration(seconds: 5),
+              duration: const Duration(seconds: 5),
             ),
           );
         }
