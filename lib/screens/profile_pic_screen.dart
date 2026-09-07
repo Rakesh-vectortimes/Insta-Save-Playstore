@@ -11,6 +11,7 @@ import '../models/profile_result.dart';
 import '../services/download_history_service.dart';
 import '../services/download_service.dart';
 import '../services/instagram_api_service.dart';
+import '../services/instagram_session.dart';
 import '../widgets/download_progress_dialog.dart';
 import '../widgets/error_banner.dart';
 import '../widgets/loading_indicator.dart';
@@ -98,21 +99,30 @@ class _ProfilePicScreenState extends ConsumerState<ProfilePicScreen> {
     if (profile == null || profile.username.isEmpty) return;
 
     if (profile.lowQuality) {
+      // Don't tell an already-logged-in user to "log in" again — that button
+      // does nothing for them and just loops back to the same dialog. Only
+      // offer the login path when there's genuinely no Instagram session yet.
+      final alreadyLoggedIn = await InstagramSession.hasSession();
+      if (!mounted) return;
       final choice = await showDialog<String>(
         context: context,
         builder: (ctx) => AlertDialog(
           backgroundColor: AppColors.darkSurface,
-          title: const Text(
-            'Sharp DP needs login',
-            style: TextStyle(
+          title: Text(
+            alreadyLoggedIn
+                ? 'Only a soft thumbnail available'
+                : 'Sharp DP needs login',
+            style: const TextStyle(
               color: AppColors.textPrimary,
               fontWeight: FontWeight.w600,
             ),
           ),
-          content: const Text(
-            'Instagram only shared a tiny thumbnail. Soft enhance will still look soft.\n\n'
-            'For the real sharp DP: log in once in the in-app browser, then search again.',
-            style: TextStyle(
+          content: Text(
+            alreadyLoggedIn
+                ? 'You’re logged in, but Instagram isn’t sharing a sharper image for this account. Soft enhance will still look soft.'
+                : 'Instagram only shared a tiny thumbnail. Soft enhance will still look soft.\n\n'
+                    'For the real sharp DP: log in once in the in-app browser, then search again.',
+            style: const TextStyle(
               color: AppColors.textSecondary,
               fontSize: 13,
               height: 1.4,
@@ -126,16 +136,17 @@ class _ProfilePicScreenState extends ConsumerState<ProfilePicScreen> {
                 style: TextStyle(color: AppColors.textMuted),
               ),
             ),
-            TextButton(
-              onPressed: () => Navigator.pop(ctx, 'login'),
-              child: const Text(
-                'Log in for sharp DP',
-                style: TextStyle(
-                  color: AppColors.accent,
-                  fontWeight: FontWeight.w600,
+            if (!alreadyLoggedIn)
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, 'login'),
+                child: const Text(
+                  'Log in for sharp DP',
+                  style: TextStyle(
+                    color: AppColors.accent,
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
               ),
-            ),
           ],
         ),
       );

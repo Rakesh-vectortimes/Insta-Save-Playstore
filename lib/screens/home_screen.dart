@@ -14,6 +14,7 @@ import '../models/reel_result.dart';
 import '../services/download_history_service.dart';
 import '../services/download_service.dart';
 import '../services/instagram_api_service.dart';
+import '../services/instagram_session.dart';
 import '../widgets/app_logo.dart';
 import '../widgets/content_preview_card.dart';
 import '../widgets/download_progress_dialog.dart';
@@ -416,20 +417,29 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
     if (_profile == null || _profile!.username.isEmpty) return;
 
     if (_profile!.lowQuality) {
+      // Don't tell an already-logged-in user to "log in" again — that button
+      // does nothing for them and just loops back to the same dialog. Only
+      // offer the login path when there's genuinely no Instagram session yet.
+      final alreadyLoggedIn = await InstagramSession.hasSession();
+      if (!mounted) return;
       final choice = await showDialog<String>(
         context: context,
         builder: (ctx) => AlertDialog(
           backgroundColor: AppColors.darkSurface,
           title: Text(
-            'Sharp DP needs login',
+            alreadyLoggedIn
+                ? 'Only a soft thumbnail available'
+                : 'Sharp DP needs login',
             style: GoogleFonts.poppins(
               color: AppColors.textPrimary,
               fontWeight: FontWeight.w600,
             ),
           ),
           content: Text(
-            'Instagram only shared a tiny thumbnail. Soft enhance will still look soft.\n\n'
-            'For the real sharp DP: Open Instagram → Log in → come back and search this username again.',
+            alreadyLoggedIn
+                ? 'You’re logged in, but Instagram isn’t sharing a sharper image for this account. Soft enhance will still look soft.'
+                : 'Instagram only shared a tiny thumbnail. Soft enhance will still look soft.\n\n'
+                    'For the real sharp DP: Open Instagram → Log in → come back and search this username again.',
             style: GoogleFonts.poppins(
               color: AppColors.textSecondary,
               fontSize: 13,
@@ -444,16 +454,17 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                 style: GoogleFonts.poppins(color: AppColors.textMuted),
               ),
             ),
-            TextButton(
-              onPressed: () => Navigator.pop(ctx, 'login'),
-              child: Text(
-                'Log in for sharp DP',
-                style: GoogleFonts.poppins(
-                  color: AppColors.accent,
-                  fontWeight: FontWeight.w600,
+            if (!alreadyLoggedIn)
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, 'login'),
+                child: Text(
+                  'Log in for sharp DP',
+                  style: GoogleFonts.poppins(
+                    color: AppColors.accent,
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
               ),
-            ),
           ],
         ),
       );
