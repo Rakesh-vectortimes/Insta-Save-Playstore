@@ -1088,12 +1088,18 @@ class _InstagramBrowserScreenState
             var out = [];
             var seen = {};
             var want = String(username || '').toLowerCase();
-            function reelOwnerOk(reel, requireMatch) {
-              if (!requireMatch) return true;
+            // Verify whenever the reel actually names an owner — even a
+            // SINGLE-reel response can be for the wrong account (the id it
+            // was fetched with came from a fragile page-scrape guess that can
+            // resolve to a completely different user's id). Only skip the
+            // check when the reel truly carries no user info at all, since
+            // then there's nothing to verify against.
+            function reelOwnerOk(reel) {
+              if (!want) return true;
               if (reel && reel.user && reel.user.username) {
                 return String(reel.user.username).toLowerCase() === want;
               }
-              return false;
+              return true;
             }
             function addList(list) {
               if (!list || !list.length) return;
@@ -1119,23 +1125,23 @@ class _InstagramBrowserScreenState
             }
             if (!data) return out;
             if (data.reels_media && data.reels_media.length) {
-              var requireReelsMediaMatch = !!want && data.reels_media.length > 1;
               for (var r = 0; r < data.reels_media.length; r++) {
                 var reelM = data.reels_media[r];
-                if (!reelOwnerOk(reelM, requireReelsMediaMatch)) continue;
+                if (!reelOwnerOk(reelM)) continue;
                 addList(reelM && reelM.items);
               }
             }
             if (data.reels) {
               var keys = Object.keys(data.reels);
-              var requireReelsMatch = !!want && keys.length > 1;
               for (var k = 0; k < keys.length; k++) {
                 var reelK = data.reels[keys[k]];
-                if (!reelOwnerOk(reelK, requireReelsMatch)) continue;
+                if (!reelOwnerOk(reelK)) continue;
                 addList(reelK && reelK.items);
               }
             }
-            if (data.reel && data.reel.items) addList(data.reel.items);
+            if (data.reel && data.reel.items && reelOwnerOk(data.reel)) {
+              addList(data.reel.items);
+            }
             if (out.length) return out;
             return slimFromAnyPayload(data, username);
           }
@@ -1946,15 +1952,19 @@ class _InstagramBrowserScreenState
     }
   }
 
-  /// True only when the reel wrapper explicitly identifies [want] as its
-  /// owner. Used to drop other users' reels out of a multi-user tray payload.
+  /// False only on a CONFIRMED mismatch. Verify whenever the reel actually
+  /// names an owner — even a single-reel payload can be for the wrong
+  /// account (its id can come from a fragile page-scrape guess that
+  /// resolved to a different user entirely), so this must not be skipped
+  /// just because there's only one reel to look at. A reel with no user
+  /// info at all is unverifiable and passes through unchanged.
   bool _reelBelongsToUser(Map reel, String want) {
     final user = reel['user'];
     if (user is Map) {
       final uname = user['username']?.toString();
       if (uname != null) return uname.toLowerCase() == want;
     }
-    return false;
+    return true;
   }
 
   List<StoryTrayItem> _parseTrayItems(dynamic data, {String? forUsername}) {
@@ -2055,10 +2065,9 @@ class _InstagramBrowserScreenState
       // `items`, or another user's slides bleed into this user's sheet.
       final reelsMedia = map['reels_media'];
       if (reelsMedia is List) {
-        final requireUserMatch = want != null && reelsMedia.length > 1;
         for (final reel in reelsMedia) {
           if (reel is Map) {
-            if (requireUserMatch && !_reelBelongsToUser(reel, want)) continue;
+            if (want != null && !_reelBelongsToUser(reel, want)) continue;
             final list = reel['items'];
             if (list is List) {
               for (final n in list) {
@@ -2077,10 +2086,9 @@ class _InstagramBrowserScreenState
 
       final reels = map['reels'];
       if (reels is Map) {
-        final requireUserMatch = want != null && reels.length > 1;
         for (final reel in reels.values) {
           if (reel is Map) {
-            if (requireUserMatch && !_reelBelongsToUser(reel, want)) continue;
+            if (want != null && !_reelBelongsToUser(reel, want)) continue;
             final list = reel['items'];
             if (list is List) {
               for (final n in list) {
@@ -2098,7 +2106,7 @@ class _InstagramBrowserScreenState
       }
 
       final reel = map['reel'];
-      if (reel is Map) {
+      if (reel is Map && (want == null || _reelBelongsToUser(reel, want))) {
         final list = reel['items'];
         if (list is List) {
           for (final n in list) {
