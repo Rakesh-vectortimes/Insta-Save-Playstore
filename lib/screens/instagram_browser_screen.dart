@@ -55,8 +55,19 @@ class _InstagramBrowserScreenState
   var _onStoryPage = false;
   var _fetchingTray = false;
 
-  /// Last tray-fetch diagnostic (always logged; shown in snackbar on fallback).
+  /// Last tray-fetch diagnostic (always logged to console, NEVER shown to the
+  /// user — it's a raw dump of internal attempt/step data for debugging).
   String? _lastTrayDebug;
+
+  /// Plain-language reason for the last tray failure, safe to show the user.
+  /// Set alongside _lastTrayDebug at every failure branch; null on success.
+  String? _lastTrayUserMessage;
+
+  /// True once _fetchStoryTray has already shown its own specific snackbar
+  /// (session expired, rate limited, not ready yet) for this attempt — the
+  /// generic "showing 1 slide only" fallback message must not pile another,
+  /// less specific message on top of one the user already saw.
+  bool _trayFailureAlreadyExplained = false;
 
   /// Avoid re-hitting web_profile_info on every pink-FAB tap (IG 429s quickly).
   final Map<String, String> _userIdCache = {};
@@ -802,6 +813,8 @@ class _InstagramBrowserScreenState
     }
 
     setState(() => _fetchingTray = true);
+    _lastTrayUserMessage = null;
+    _trayFailureAlreadyExplained = false;
     try {
       final c = _controller;
       if (c != null) {
@@ -887,14 +900,18 @@ class _InstagramBrowserScreenState
       } else if (currentItems.isNotEmpty) {
         merged = [currentItems.first];
         preferredId = merged.first.id;
-        if (mounted) {
-          final diag = _lastTrayDebug ?? 'unknown';
+        // A specific reason (session expired / rate limited / not ready yet)
+        // was already shown to the user inside _fetchStoryTray — don't pile
+        // a second, vaguer message on top of it.
+        if (mounted && !_trayFailureAlreadyExplained) {
+          final reason = _lastTrayUserMessage ??
+              'Couldn\'t load this story\'s other slides right now.';
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
               content: Text(
-                'Tray failed — showing 1 slide only.\n$diag',
+                '$reason Showing the slide you\'re viewing — try again in a moment for the rest.',
               ),
-              duration: const Duration(seconds: 8),
+              duration: const Duration(seconds: 6),
             ),
           );
         }
@@ -906,14 +923,19 @@ class _InstagramBrowserScreenState
 
       if (!mounted) return;
       if (merged.isEmpty) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text(
-              'Couldn’t grab this slide yet. Wait until the story finishes loading, then tap download again.',
+        if (!_trayFailureAlreadyExplained) {
+          final prefix = _lastTrayUserMessage != null
+              ? '${_lastTrayUserMessage!} '
+              : '';
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                '${prefix}Couldn\'t grab this slide yet. Wait until the story finishes loading, then tap download again.',
+              ),
+              duration: const Duration(seconds: 5),
             ),
-            duration: Duration(seconds: 5),
-          ),
-        );
+          );
+        }
         return;
       }
 
@@ -1678,6 +1700,8 @@ class _InstagramBrowserScreenState
       if (decoded is! Map) {
         _lastTrayDebug =
             'raw error=${result?.error} valueType=${decoded.runtimeType}';
+        _lastTrayUserMessage =
+            'Something went wrong loading this story\'s slides.';
         print('[Browser] tray raw error=${result?.error} value=$decoded');
         return null;
       }
@@ -1686,11 +1710,15 @@ class _InstagramBrowserScreenState
         _lastTrayDebug = 'requiresLogin status=${decoded['status']} '
             'attempts=${decoded['attempts']}';
         print('[Browser] tray requiresLogin $_lastTrayDebug');
+        _trayFailureAlreadyExplained = true;
         if (mounted) {
           setState(() => _loggedIn = false);
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
-              content: Text('Session expired. Please log in again.'),
+              content: Text(
+                'Your Instagram session expired. Log in again to keep downloading stories.',
+              ),
+              duration: Duration(seconds: 5),
             ),
           );
         }
@@ -1703,6 +1731,7 @@ class _InstagramBrowserScreenState
             'rateLimited cooldown=$onCooldown status=${decoded['status']} '
             'attempts=${decoded['attempts']}';
         print('[Browser] tray $_lastTrayDebug');
+        _trayFailureAlreadyExplained = true;
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
@@ -1722,6 +1751,7 @@ class _InstagramBrowserScreenState
         _lastTrayDebug =
             'no_user_id attempts=${decoded['attempts']} hint=${decoded['hint']}';
         print('[Browser] tray $_lastTrayDebug');
+        _trayFailureAlreadyExplained = true;
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
@@ -1745,6 +1775,9 @@ class _InstagramBrowserScreenState
         _lastTrayDebug =
             'error=${decoded['error']} attempts=${decoded['attempts']}';
         print('[Browser] tray not ok: $_lastTrayDebug');
+        _lastTrayUserMessage = decoded['error']?.toString() == 'no_reels'
+            ? 'Couldn\'t load this story\'s other slides right now.'
+            : 'Couldn\'t fully load this story right now.';
         return null;
       }
 
@@ -1756,6 +1789,7 @@ class _InstagramBrowserScreenState
       final rawItems = decoded['items'];
       if (rawItems is! List || rawItems.isEmpty) {
         _lastTrayDebug = '$_lastTrayDebug itemsEmpty';
+        _lastTrayUserMessage = 'Couldn\'t load this story\'s other slides right now.';
         print('[Browser] tray items empty after ok');
         return null;
       }
