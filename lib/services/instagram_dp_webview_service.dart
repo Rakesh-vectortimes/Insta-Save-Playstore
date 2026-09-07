@@ -33,6 +33,18 @@ class InstagramDpWebViewService {
   static const _igAppId = '936619743392459';
   static const int _hdMinEdge = 640;
 
+  /// Instagram's web-facing profile endpoint caps the "hd" profile picture
+  /// at a modest size (often ~320px) even for a logged-in session — the
+  /// SAME account can show a genuinely sharp, full-resolution picture in
+  /// the real Instagram app's own "view photo" viewer. Presenting as the
+  /// native Android app on the same request often unlocks that real
+  /// hd_profile_pic_url_info instead of the web-capped one. A browser's
+  /// fetch() can't override User-Agent (it's a forbidden header), so this
+  /// only works via a raw HTTP request, never from inside the WebView page.
+  static const _appUserAgent =
+      'Instagram 309.0.0.41.113 Android (33/13; 420dpi; 1080x2400; '
+      'samsung; SM-G991B; o1s; exynos2100; en_US; 550821585)';
+
   static Future<String?> getStoredSessionId() => InstagramSession.getSessionId();
 
   /// Prefer native HTTP with WebView cookies (session HD), then WebView fallback.
@@ -51,9 +63,21 @@ class InstagramDpWebViewService {
       return native;
     }
 
+    // 1b) Same account, same endpoint shape, but posing as the native app —
+    // often returns the real, uncapped HD picture the web UA never gets.
+    final appApi = await _fetchViaAppApi(clean);
+    if (appApi != null && appApi.isHd) {
+      if (kDebugMode) {
+        debugPrint(
+          '[DP] app-UA HD ${appApi.width}x${appApi.height} source=${appApi.source}',
+        );
+      }
+      return appApi;
+    }
+
     // 2) WebView session fetch
     final web = await _fetchViaWebView(clean);
-    final best = _pickBetter(native, web);
+    final best = _pickBetter(_pickBetter(native, appApi), web);
     if (best == null) return null;
 
     // 3) Try upgrading CDN size tokens if still low-res (may 403 — keep lowQuality).
@@ -123,6 +147,52 @@ class InstagramDpWebViewService {
       return _fromUserMap(Map<String, dynamic>.from(user), username);
     } catch (e) {
       if (kDebugMode) debugPrint('[DP] native API error: $e');
+      return null;
+    }
+  }
+
+  /// Same request shape as [_fetchViaNativeApi], posing as the native
+  /// Android app (User-Agent + i.instagram.com host) instead of a mobile
+  /// browser. Purely additive — on any failure this just contributes
+  /// nothing and the existing web-UA / WebView results are used as before.
+  static Future<DpExtractionResult?> _fetchViaAppApi(String username) async {
+    try {
+      final cookie = await InstagramSession.cookieHeader();
+      final dio = Dio(
+        BaseOptions(
+          connectTimeout: const Duration(seconds: 12),
+          receiveTimeout: const Duration(seconds: 12),
+          headers: {
+            'User-Agent': _appUserAgent,
+            'Accept': '*/*',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'X-IG-App-ID': _igAppId,
+            'X-Requested-With': 'XMLHttpRequest',
+            'Referer': 'https://www.instagram.com/',
+            if (cookie != null && cookie.isNotEmpty) 'Cookie': cookie,
+          },
+          responseType: ResponseType.json,
+          validateStatus: (s) => s != null && s < 500,
+        ),
+      );
+
+      final response = await dio.get<Map<String, dynamic>>(
+        'https://i.instagram.com/api/v1/users/web_profile_info/',
+        queryParameters: {'username': username},
+      );
+
+      if (response.statusCode != 200 || response.data == null) {
+        if (kDebugMode) {
+          debugPrint('[DP] app-UA HTTP ${response.statusCode}');
+        }
+        return null;
+      }
+
+      final user = response.data?['data']?['user'];
+      if (user is! Map) return null;
+      return _fromUserMap(Map<String, dynamic>.from(user), username);
+    } catch (e) {
+      if (kDebugMode) debugPrint('[DP] app-UA API error: $e');
       return null;
     }
   }
