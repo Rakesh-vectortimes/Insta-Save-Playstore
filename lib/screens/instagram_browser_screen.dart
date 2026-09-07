@@ -1080,8 +1080,21 @@ class _InstagramBrowserScreenState
             return best;
           }
           function slimFromPayload(data) {
+            // The username only lives on the reel wrapper (reels_media[i],
+            // reels[key]), never on each story item — so a multi-reel
+            // payload (e.g. a tray captured while scrolling the home feed)
+            // must be filtered HERE, before flattening items, or another
+            // user's slides get attributed to `username`.
             var out = [];
             var seen = {};
+            var want = String(username || '').toLowerCase();
+            function reelOwnerOk(reel, requireMatch) {
+              if (!requireMatch) return true;
+              if (reel && reel.user && reel.user.username) {
+                return String(reel.user.username).toLowerCase() === want;
+              }
+              return false;
+            }
             function addList(list) {
               if (!list || !list.length) return;
               for (var i = 0; i < list.length; i++) {
@@ -1106,54 +1119,71 @@ class _InstagramBrowserScreenState
             }
             if (!data) return out;
             if (data.reels_media && data.reels_media.length) {
+              var requireReelsMediaMatch = !!want && data.reels_media.length > 1;
               for (var r = 0; r < data.reels_media.length; r++) {
-                addList(data.reels_media[r] && data.reels_media[r].items);
+                var reelM = data.reels_media[r];
+                if (!reelOwnerOk(reelM, requireReelsMediaMatch)) continue;
+                addList(reelM && reelM.items);
               }
             }
             if (data.reels) {
               var keys = Object.keys(data.reels);
+              var requireReelsMatch = !!want && keys.length > 1;
               for (var k = 0; k < keys.length; k++) {
-                addList(data.reels[keys[k]] && data.reels[keys[k]].items);
+                var reelK = data.reels[keys[k]];
+                if (!reelOwnerOk(reelK, requireReelsMatch)) continue;
+                addList(reelK && reelK.items);
               }
             }
             if (data.reel && data.reel.items) addList(data.reel.items);
             if (out.length) return out;
             return slimFromAnyPayload(data, username);
           }
-          function deepFindStoryItems(node, out, seen, depth) {
+          function deepFindStoryItems(node, out, seen, depth, ctxUser) {
             if (!node || depth > 8) return;
             if (Array.isArray(node)) {
               for (var i = 0; i < node.length; i++) {
-                deepFindStoryItems(node[i], out, seen, depth + 1);
+                deepFindStoryItems(node[i], out, seen, depth + 1, ctxUser);
               }
               return;
             }
             if (typeof node !== 'object') return;
+            // Track the nearest enclosing `user` we've seen while descending —
+            // individual story items rarely carry their own `user` field, only
+            // the reel/tray wrapper around them does.
+            var nextCtx = ctxUser;
+            if (node.user && node.user.username) {
+              nextCtx = String(node.user.username).toLowerCase();
+            }
             var looksLikeItem = (node.image_versions2 || node.video_versions) &&
               (node.expiring_at || node.taken_at);
             if (looksLikeItem) {
               var id = String(node.pk || node.id || '');
               if (id && !seen[id]) {
                 seen[id] = true;
-                out.push(node);
+                out.push({ item: node, ownerUsername: nextCtx });
               }
             }
             for (var key in node) {
               if (Object.prototype.hasOwnProperty.call(node, key)) {
-                deepFindStoryItems(node[key], out, seen, depth + 1);
+                deepFindStoryItems(node[key], out, seen, depth + 1, nextCtx);
               }
             }
           }
           function slimFromAnyPayload(data, wantUsername) {
             var rawItems = [];
             var seen = {};
-            deepFindStoryItems(data, rawItems, seen, 0);
+            deepFindStoryItems(data, rawItems, seen, 0, null);
             var want = wantUsername ? String(wantUsername).toLowerCase() : '';
             var out = [];
             for (var i = 0; i < rawItems.length; i++) {
-              var it = rawItems[i];
-              if (want && it.user && it.user.username &&
-                  String(it.user.username).toLowerCase() !== want) continue;
+              var entry = rawItems[i];
+              var it = entry.item;
+              // Reject only a CONFIRMED other-user context; an item with no
+              // determinable owner (no enclosing `user` node anywhere above
+              // it) is kept, since that's the common shape for a single-user
+              // fetch that never wraps items in a `user`-tagged reel object.
+              if (want && entry.ownerUsername && entry.ownerUsername !== want) continue;
               var id = String(it.pk || it.id || '');
               var videoUrl = bestUrl(it.video_versions);
               var imageUrl = it.image_versions2
