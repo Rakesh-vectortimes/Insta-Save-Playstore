@@ -2437,101 +2437,112 @@ class _InstagramBrowserScreenState
     }
 
     var ok = 0;
+    var failed = 0;
+    String? lastError;
     try {
       for (var i = 0; i < items.length; i++) {
         final item = items[i];
         progressNotifier.value = null;
-
-        final isVideo = item.isVideo;
-        final fileName = _downloadService.buildFileName(
-          prefix: 'instasave_${username}_story',
-          ext: isVideo ? 'mp4' : 'jpg',
-          index: i + 1,
-        );
-        final saveType =
-            isVideo ? MediaSaveType.video : MediaSaveType.image;
-
-        DownloadResult result;
-        final cleanUrl = item.mediaUrl.replaceAll('&amp;', '&');
         messageNotifier.value = 'Saving ${i + 1}/${items.length}…';
 
-        // Signed CDN: prefer plain GET with Referer (cookies often cause 403).
-        final bytes = await _downloadCdnBytes(cleanUrl);
-        if (bytes != null && bytes.isNotEmpty) {
-          if (saveType == MediaSaveType.video &&
-              !InstagramCdnUtils.looksLikeMp4(bytes)) {
-            if (InstagramCdnUtils.looksLikeJpeg(bytes)) {
+        // Each item is isolated: one bad slide (a stale/expired CDN url, a
+        // truncated video) must not sink the rest of the selection — a user
+        // who picked 10 slides expects the other 9 to still save.
+        try {
+          final isVideo = item.isVideo;
+          final fileName = _downloadService.buildFileName(
+            prefix: 'instasave_${username}_story',
+            ext: isVideo ? 'mp4' : 'jpg',
+            index: i + 1,
+          );
+          final saveType =
+              isVideo ? MediaSaveType.video : MediaSaveType.image;
+
+          DownloadResult result;
+          final cleanUrl = item.mediaUrl.replaceAll('&amp;', '&');
+
+          // Signed CDN: prefer plain GET with Referer (cookies often cause 403).
+          final bytes = await _downloadCdnBytes(cleanUrl);
+          if (bytes != null && bytes.isNotEmpty) {
+            if (saveType == MediaSaveType.video &&
+                !InstagramCdnUtils.looksLikeMp4(bytes)) {
+              if (InstagramCdnUtils.looksLikeJpeg(bytes)) {
+                result = await _downloadService.saveBytes(
+                  bytes: bytes,
+                  fileName: _downloadService.buildFileName(
+                    prefix: 'instasave_${username}_story',
+                    ext: 'jpg',
+                    index: i + 1,
+                  ),
+                  saveType: MediaSaveType.image,
+                );
+              } else {
+                throw Exception(
+                  'Downloaded file is not a playable video. Try again.',
+                );
+              }
+            } else {
               result = await _downloadService.saveBytes(
                 bytes: bytes,
-                fileName: _downloadService.buildFileName(
-                  prefix: 'instasave_${username}_story',
-                  ext: 'jpg',
-                  index: i + 1,
-                ),
-                saveType: MediaSaveType.image,
-              );
-            } else {
-              throw Exception(
-                'Downloaded file is not a playable video. Try again.',
+                fileName: fileName,
+                saveType: saveType,
               );
             }
           } else {
-            result = await _downloadService.saveBytes(
-              bytes: bytes,
+            result = await _downloadService.downloadAndSave(
+              url: cleanUrl,
               fileName: fileName,
               saveType: saveType,
+              extraHeaders: {
+                'Referer': (_pageUrl != null && _pageUrl!.startsWith('http'))
+                    ? _pageUrl!
+                    : 'https://www.instagram.com/',
+              },
+              onProgress: (p) => progressNotifier.value = p,
             );
           }
-        } else {
-          result = await _downloadService.downloadAndSave(
-            url: cleanUrl,
-            fileName: fileName,
-            saveType: saveType,
-            extraHeaders: {
-              'Referer': (_pageUrl != null && _pageUrl!.startsWith('http'))
-                  ? _pageUrl!
-                  : 'https://www.instagram.com/',
-            },
-            onProgress: (p) => progressNotifier.value = p,
+
+          final history = DownloadItem(
+            id: '${DateTime.now().millisecondsSinceEpoch}_$i',
+            fileName: result.savedPath.split('/').last,
+            localPath: result.savedPath,
+            thumbnailUrl: item.thumbnailUrl ?? item.mediaUrl,
+            sourceUrl: _pageUrl ?? _startUrl,
+            type: isVideo ? DownloadMediaType.video : DownloadMediaType.photo,
+            quality: 'HD',
+            fileSizeBytes: result.fileSizeBytes,
+            downloadedAt: DateTime.now(),
+            author: username,
+            title: 'Instagram Story',
           );
+          await ref.read(downloadHistoryProvider.notifier).add(history);
+          ok++;
+        } catch (e) {
+          failed++;
+          lastError = e.toString().replaceFirst('Exception: ', '');
+          if (kDebugMode) {
+            debugPrint('[Browser] story item $i download failed: $e');
+          }
         }
-
-        final history = DownloadItem(
-          id: '${DateTime.now().millisecondsSinceEpoch}_$i',
-          fileName: result.savedPath.split('/').last,
-          localPath: result.savedPath,
-          thumbnailUrl: item.thumbnailUrl ?? item.mediaUrl,
-          sourceUrl: _pageUrl ?? _startUrl,
-          type: isVideo ? DownloadMediaType.video : DownloadMediaType.photo,
-          quality: 'HD',
-          fileSizeBytes: result.fileSizeBytes,
-          downloadedAt: DateTime.now(),
-          author: username,
-          title: 'Instagram Story',
-        );
-        await ref.read(downloadHistoryProvider.notifier).add(history);
-        ok++;
       }
 
       if (mounted) {
         Navigator.of(context, rootNavigator: true).pop();
+        final blocked = lastError != null &&
+            (lastError.contains('blocked') || lastError.contains('403'));
+        final String message;
+        if (failed == 0) {
+          message = 'Saved $ok story item(s) to gallery';
+        } else if (ok == 0) {
+          message = blocked
+              ? 'Instagram blocked the download. Stay logged in and try again.'
+              : 'Download failed: ${lastError ?? 'unknown error'}';
+        } else {
+          message = 'Saved $ok of ${items.length} — $failed failed'
+              '${blocked ? ' (Instagram may be blocking some requests)' : ''}';
+        }
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Saved $ok story item(s) to gallery')),
-        );
-      }
-    } catch (e) {
-      if (mounted) {
-        Navigator.of(context, rootNavigator: true).pop();
-        final msg = e.toString().replaceFirst('Exception: ', '');
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              msg.contains('blocked') || msg.contains('403')
-                  ? 'Instagram blocked the download. Stay logged in and try again.'
-                  : 'Download failed: $msg',
-            ),
-            duration: const Duration(seconds: 5),
-          ),
+          SnackBar(content: Text(message), duration: const Duration(seconds: 5)),
         );
       }
     } finally {

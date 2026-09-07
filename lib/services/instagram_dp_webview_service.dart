@@ -173,10 +173,14 @@ class InstagramDpWebViewService {
       }
     }
 
+    // No explicit width/height on this field — let consider() derive the
+    // real edge from the CDN URL's own size token instead of assuming a
+    // fixed 720px (many accounts' actual HD picture is well below that,
+    // which previously made the app claim "HD" for a mediocre image).
     consider(
       user['profile_pic_url_hd']?.toString(),
-      720,
-      720,
+      0,
+      0,
       'session_hd',
     );
 
