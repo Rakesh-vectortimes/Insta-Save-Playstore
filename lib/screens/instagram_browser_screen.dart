@@ -873,7 +873,7 @@ class _InstagramBrowserScreenState
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text(
-            'Log into Instagram on this page first. We never store your password.',
+            'Log into Instagram on this page first. We never store your username or password — login is only in this web view.',
           ),
           duration: Duration(seconds: 4),
         ),
@@ -2592,7 +2592,7 @@ class _InstagramBrowserScreenState
                     ),
                     const SizedBox(height: 8),
                     Text(
-                      'We never store your Instagram password.',
+                      'We never store your Instagram username or password — login is only in this web view.',
                       style: GoogleFonts.poppins(
                         color: AppColors.textMuted,
                         fontSize: 11,
@@ -3195,7 +3195,7 @@ class _TipBanner extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  'Tap Log in / Sign up on this page (not “Open Instagram”). After you’re logged in, open a story and tap the pink download button. We never store your password.',
+                  'Only public account stories can be saved. Paste the story link into the app each time — browsing alone isn’t enough. Log in once here on Instagram’s website (not “Open Instagram”). We never store your username or password; this is only a secure web view. Then tap the pink download button.',
                   style: GoogleFonts.poppins(
                     color: AppColors.textSecondary,
                     fontSize: 12,
@@ -3327,8 +3327,9 @@ class _WhyLoginDialog extends StatelessWidget {
             ),
             const SizedBox(height: 8),
             Text(
-              '1. Due to Instagram updates, you need to log in to download stories.\n'
-              '2. You log into Instagram’s official website. We never store your password.',
+              '1. Only stories from public accounts can be fetched.\n'
+              '2. Paste the story link into the app each time you want to download — browsing Instagram alone isn’t enough.\n'
+              '3. Log in once on Instagram’s official website inside this browser. We never store your username or password — it’s just a secure web view.',
               style: GoogleFonts.poppins(
                 color: AppColors.textSecondary,
                 fontSize: 13,
@@ -3346,9 +3347,9 @@ class _WhyLoginDialog extends StatelessWidget {
             ),
             const SizedBox(height: 8),
             Text(
-              '1. Download Posts / Reels / Stories available to your account.\n'
+              '1. Open the pasted story, then tap the pink download button.\n'
               '2. You only need to log in once — your session stays in the app browser.\n'
-              '3. You can log out anytime on Instagram.',
+              '3. You can log out anytime from the ⋮ menu.',
               style: GoogleFonts.poppins(
                 color: AppColors.textSecondary,
                 fontSize: 13,
