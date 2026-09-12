@@ -7,13 +7,21 @@ class AppConstants {
   static const String appDisplayName = 'Video Downloader - Save Story';
 
   static const String storyLoginHint =
-      'For stories, open Instagram in the app browser, view the story, then tap Save.';
+      'Stories: paste a public story link each time, log in once in the in-app browser, then save. We never store your credentials.';
 
   static const String storyNotSupportedMessage =
-      'Stories require login and aren\'t supported. We only support public posts and reels.';
+      'Only public account stories can be downloaded. Paste a story link after logging in with the in-app browser.';
 
   static const String invalidUrlMessage =
-      'Please paste a valid Instagram link';
+      'Couldn’t fetch that content. Please check that the Instagram URL is valid and try again.';
+
+  static const String storyDisclaimerTitle = 'About story downloads';
+
+  static const String storyDisclaimerBody =
+      '• Only stories from public accounts can be fetched.\n'
+      '• You must log in once inside our in-app browser (Instagram’s website).\n'
+      '• We never store your username or password — login happens only in a secure web view.\n'
+      '• You can’t download by browsing Instagram alone. Paste the story link here each time you want to save.';
 
   static const String splashHeadline = 'No Login Required';
   static const String splashSubtitle =

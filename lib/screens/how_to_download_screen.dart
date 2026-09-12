@@ -82,7 +82,7 @@ class _HowToDownloadScreenState extends State<HowToDownloadScreen> {
       return [
         _NoticeCard(
           text:
-              'For stories: Open Instagram → log in once on Instagram’s site (we never store your password) → open a story → tap the pink download button → select stories to save.',
+              'Only public account stories can be downloaded. Paste the story link into the app each time you want to save — browsing Instagram alone isn’t enough. Log in once in our in-app browser (Instagram’s website). We never store your username or password; it’s only a secure web view.',
         ),
         const SizedBox(height: 12),
         ..._copyAndShareMethods(

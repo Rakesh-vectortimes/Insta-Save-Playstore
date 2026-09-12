@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:cached_network_image/cached_network_image.dart';
@@ -55,8 +56,19 @@ class _InstagramBrowserScreenState
   var _onStoryPage = false;
   var _fetchingTray = false;
 
-  /// Last tray-fetch diagnostic (always logged; shown in snackbar on fallback).
+  /// Last tray-fetch diagnostic (always logged to console, NEVER shown to the
+  /// user — it's a raw dump of internal attempt/step data for debugging).
   String? _lastTrayDebug;
+
+  /// Plain-language reason for the last tray failure, safe to show the user.
+  /// Set alongside _lastTrayDebug at every failure branch; null on success.
+  String? _lastTrayUserMessage;
+
+  /// True once _fetchStoryTray has already shown its own specific snackbar
+  /// (session expired, rate limited, not ready yet) for this attempt — the
+  /// generic "showing 1 slide only" fallback message must not pile another,
+  /// less specific message on top of one the user already saw.
+  bool _trayFailureAlreadyExplained = false;
 
   /// Avoid re-hitting web_profile_info on every pink-FAB tap (IG 429s quickly).
   final Map<String, String> _userIdCache = {};
@@ -73,6 +85,16 @@ class _InstagramBrowserScreenState
     r'instagram\.com/stories/',
     caseSensitive: false,
   ).hasMatch(widget.initialUrl);
+
+  /// While true, the raw Instagram page is covered with a loading state
+  /// instead of being shown — the WebView still loads and runs underneath
+  /// (its cookies/network activity are what the auto-fetch depends on), the
+  /// user just isn't shown Instagram's own UI flashing by first. Cleared as
+  /// soon as the auto-fetch attempt finishes (success or failure) or, if the
+  /// user isn't logged in, immediately (they need to see the real page to
+  /// log in). A hard timeout guards against ever trapping the user here.
+  late bool _hideBrowserForAutoFetch = _isDirectStoryLink;
+  Timer? _hideBrowserTimeoutTimer;
 
   static const _nonUserPaths = {
     'notifications',
@@ -110,12 +132,32 @@ class _InstagramBrowserScreenState
       await _refreshSessionFlag();
       await _maybeShowWhyLogin();
     });
+    if (_hideBrowserForAutoFetch) {
+      // Never trap the user on a loading screen indefinitely — if the
+      // auto-fetch hasn't revealed the page or shown the download sheet by
+      // itself well within this window, something unexpected happened
+      // (a hung page load, a WebView error) and they need to see the real
+      // page to recover manually.
+      _hideBrowserTimeoutTimer = Timer(const Duration(seconds: 20), () {
+        if (mounted && _hideBrowserForAutoFetch) {
+          setState(() => _hideBrowserForAutoFetch = false);
+        }
+      });
+    }
   }
 
   @override
   void dispose() {
+    _hideBrowserTimeoutTimer?.cancel();
     _urlController.dispose();
     super.dispose();
+  }
+
+  void _revealBrowserForAutoFetch() {
+    _hideBrowserTimeoutTimer?.cancel();
+    if (mounted && _hideBrowserForAutoFetch) {
+      setState(() => _hideBrowserForAutoFetch = false);
+    }
   }
 
   Future<void> _refreshSessionFlag() async {
@@ -123,7 +165,39 @@ class _InstagramBrowserScreenState
     if (mounted) setState(() => _loggedIn = has);
   }
 
+  Future<void> _logout() async {
+    try {
+      await CookieManager.instance().deleteAllCookies();
+    } catch (e) {
+      if (kDebugMode) debugPrint('[Browser] logout cookie clear failed: $e');
+    }
+    // Drop everything cached from the outgoing session — a stale user id or
+    // captured tray from this account must never be reused once a different
+    // account logs in on the same device.
+    _userIdCache.clear();
+    _capturedTrayPayload = null;
+    _capturedStoryUrls.clear();
+    _lastFetchedUsername = null;
+    try {
+      await _controller?.loadUrl(
+        urlRequest: URLRequest(
+          url: WebUri('https://www.instagram.com/accounts/login/'),
+        ),
+      );
+    } catch (_) {}
+    if (mounted) {
+      setState(() => _loggedIn = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Logged out of Instagram.')),
+      );
+    }
+  }
+
   Future<void> _maybeShowWhyLogin() async {
+    // This dialog only explains why a login is needed — moot (and, being
+    // modal, actively in the way) when a pasted story link is already
+    // fetching automatically because a session already exists.
+    if (_isDirectStoryLink && _loggedIn) return;
     final prefs = await SharedPreferences.getInstance();
     final shown = prefs.getBool(_prefsWhyLoginKey) ?? false;
     if (shown || !mounted) return;
@@ -774,11 +848,22 @@ class _InstagramBrowserScreenState
   /// page with no obvious next step.
   Future<void> _maybeAutoTriggerDownload() async {
     if (!_isDirectStoryLink || _autoDownloadAttempted) return;
-    if (!_loggedIn || !_onStoryPage || _fetchingTray) return;
+    if (!_loggedIn) {
+      // Nothing to hide behind — reveal the real page so the user can log in.
+      _revealBrowserForAutoFetch();
+      return;
+    }
+    if (!_onStoryPage || _fetchingTray) return;
     _autoDownloadAttempted = true;
     await Future<void>.delayed(const Duration(milliseconds: 600));
     if (!mounted) return;
-    await _onDownloadFabPressed();
+    try {
+      await _onDownloadFabPressed();
+    } finally {
+      // Whether it succeeded (the sheet is up as a modal) or failed (a
+      // snackbar explains why), the underlying page can be shown now.
+      _revealBrowserForAutoFetch();
+    }
   }
 
   Future<void> _onDownloadFabPressed() async {
@@ -788,7 +873,7 @@ class _InstagramBrowserScreenState
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text(
-            'Log into Instagram on this page first. We never store your password.',
+            'Log into Instagram on this page first. We never store your username or password — login is only in this web view.',
           ),
           duration: Duration(seconds: 4),
         ),
@@ -802,6 +887,8 @@ class _InstagramBrowserScreenState
     }
 
     setState(() => _fetchingTray = true);
+    _lastTrayUserMessage = null;
+    _trayFailureAlreadyExplained = false;
     try {
       final c = _controller;
       if (c != null) {
@@ -887,14 +974,18 @@ class _InstagramBrowserScreenState
       } else if (currentItems.isNotEmpty) {
         merged = [currentItems.first];
         preferredId = merged.first.id;
-        if (mounted) {
-          final diag = _lastTrayDebug ?? 'unknown';
+        // A specific reason (session expired / rate limited / not ready yet)
+        // was already shown to the user inside _fetchStoryTray — don't pile
+        // a second, vaguer message on top of it.
+        if (mounted && !_trayFailureAlreadyExplained) {
+          final reason = _lastTrayUserMessage ??
+              'Couldn\'t load this story\'s other slides right now.';
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
               content: Text(
-                'Tray failed — showing 1 slide only.\n$diag',
+                '$reason Showing the slide you\'re viewing — try again in a moment for the rest.',
               ),
-              duration: const Duration(seconds: 8),
+              duration: const Duration(seconds: 6),
             ),
           );
         }
@@ -906,14 +997,19 @@ class _InstagramBrowserScreenState
 
       if (!mounted) return;
       if (merged.isEmpty) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text(
-              'Couldn’t grab this slide yet. Wait until the story finishes loading, then tap download again.',
+        if (!_trayFailureAlreadyExplained) {
+          final prefix = _lastTrayUserMessage != null
+              ? '${_lastTrayUserMessage!} '
+              : '';
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                '${prefix}Couldn\'t grab this slide yet. Wait until the story finishes loading, then tap download again.',
+              ),
+              duration: const Duration(seconds: 5),
             ),
-            duration: Duration(seconds: 5),
-          ),
-        );
+          );
+        }
         return;
       }
 
@@ -1080,8 +1176,27 @@ class _InstagramBrowserScreenState
             return best;
           }
           function slimFromPayload(data) {
+            // The username only lives on the reel wrapper (reels_media[i],
+            // reels[key]), never on each story item — so a multi-reel
+            // payload (e.g. a tray captured while scrolling the home feed)
+            // must be filtered HERE, before flattening items, or another
+            // user's slides get attributed to `username`.
             var out = [];
             var seen = {};
+            var want = String(username || '').toLowerCase();
+            // Verify whenever the reel actually names an owner — even a
+            // SINGLE-reel response can be for the wrong account (the id it
+            // was fetched with came from a fragile page-scrape guess that can
+            // resolve to a completely different user's id). Only skip the
+            // check when the reel truly carries no user info at all, since
+            // then there's nothing to verify against.
+            function reelOwnerOk(reel) {
+              if (!want) return true;
+              if (reel && reel.user && reel.user.username) {
+                return String(reel.user.username).toLowerCase() === want;
+              }
+              return true;
+            }
             function addList(list) {
               if (!list || !list.length) return;
               for (var i = 0; i < list.length; i++) {
@@ -1107,53 +1222,70 @@ class _InstagramBrowserScreenState
             if (!data) return out;
             if (data.reels_media && data.reels_media.length) {
               for (var r = 0; r < data.reels_media.length; r++) {
-                addList(data.reels_media[r] && data.reels_media[r].items);
+                var reelM = data.reels_media[r];
+                if (!reelOwnerOk(reelM)) continue;
+                addList(reelM && reelM.items);
               }
             }
             if (data.reels) {
               var keys = Object.keys(data.reels);
               for (var k = 0; k < keys.length; k++) {
-                addList(data.reels[keys[k]] && data.reels[keys[k]].items);
+                var reelK = data.reels[keys[k]];
+                if (!reelOwnerOk(reelK)) continue;
+                addList(reelK && reelK.items);
               }
             }
-            if (data.reel && data.reel.items) addList(data.reel.items);
+            if (data.reel && data.reel.items && reelOwnerOk(data.reel)) {
+              addList(data.reel.items);
+            }
             if (out.length) return out;
             return slimFromAnyPayload(data, username);
           }
-          function deepFindStoryItems(node, out, seen, depth) {
+          function deepFindStoryItems(node, out, seen, depth, ctxUser) {
             if (!node || depth > 8) return;
             if (Array.isArray(node)) {
               for (var i = 0; i < node.length; i++) {
-                deepFindStoryItems(node[i], out, seen, depth + 1);
+                deepFindStoryItems(node[i], out, seen, depth + 1, ctxUser);
               }
               return;
             }
             if (typeof node !== 'object') return;
+            // Track the nearest enclosing `user` we've seen while descending —
+            // individual story items rarely carry their own `user` field, only
+            // the reel/tray wrapper around them does.
+            var nextCtx = ctxUser;
+            if (node.user && node.user.username) {
+              nextCtx = String(node.user.username).toLowerCase();
+            }
             var looksLikeItem = (node.image_versions2 || node.video_versions) &&
               (node.expiring_at || node.taken_at);
             if (looksLikeItem) {
               var id = String(node.pk || node.id || '');
               if (id && !seen[id]) {
                 seen[id] = true;
-                out.push(node);
+                out.push({ item: node, ownerUsername: nextCtx });
               }
             }
             for (var key in node) {
               if (Object.prototype.hasOwnProperty.call(node, key)) {
-                deepFindStoryItems(node[key], out, seen, depth + 1);
+                deepFindStoryItems(node[key], out, seen, depth + 1, nextCtx);
               }
             }
           }
           function slimFromAnyPayload(data, wantUsername) {
             var rawItems = [];
             var seen = {};
-            deepFindStoryItems(data, rawItems, seen, 0);
+            deepFindStoryItems(data, rawItems, seen, 0, null);
             var want = wantUsername ? String(wantUsername).toLowerCase() : '';
             var out = [];
             for (var i = 0; i < rawItems.length; i++) {
-              var it = rawItems[i];
-              if (want && it.user && it.user.username &&
-                  String(it.user.username).toLowerCase() !== want) continue;
+              var entry = rawItems[i];
+              var it = entry.item;
+              // Reject only a CONFIRMED other-user context; an item with no
+              // determinable owner (no enclosing `user` node anywhere above
+              // it) is kept, since that's the common shape for a single-user
+              // fetch that never wraps items in a `user`-tagged reel object.
+              if (want && entry.ownerUsername && entry.ownerUsername !== want) continue;
               var id = String(it.pk || it.id || '');
               var videoUrl = bestUrl(it.video_versions);
               var imageUrl = it.image_versions2
@@ -1338,7 +1470,32 @@ class _InstagramBrowserScreenState
               }
             } catch (e) {}
           }
+          // A real 429 means IG has already flagged this session — hammering
+          // it again on the very next story (up to 7 requests per attempt:
+          // 3 POST bodies, 3 GET fallbacks, 1 profile lookup) only extends
+          // the block. Remember it and back off for a cooldown window instead
+          // of spending the whole request budget again just to get 429'd.
+          function noteRateLimited() {
+            try {
+              sessionStorage.setItem('qs_ig_429_until', String(Date.now() + 120000));
+            } catch (e) {}
+          }
+          function rateLimitCooldownRemaining() {
+            try {
+              var until = parseInt(sessionStorage.getItem('qs_ig_429_until') || '0', 10);
+              return until > Date.now() ? until - Date.now() : 0;
+            } catch (e) { return 0; }
+          }
           try {
+            var cooldownMs = rateLimitCooldownRemaining();
+            if (cooldownMs > 0) {
+              return {
+                rateLimited: true,
+                cooldown: true,
+                status: 429,
+                attempts: [{ step: 'cooldown', remainingMs: cooldownMs }]
+              };
+            }
             try {
               var storedClaim = sessionStorage.getItem('qs_ig_www_claim');
               if (storedClaim) headers['X-IG-WWW-Claim'] = storedClaim;
@@ -1461,6 +1618,7 @@ class _InstagramBrowserScreenState
                   claim: headers['X-IG-WWW-Claim']
                 });
                 if (postRes.status === 429) {
+                  noteRateLimited();
                   return { rateLimited: true, status: 429, attempts: attempts };
                 }
                 if (postRes.ok) {
@@ -1496,6 +1654,7 @@ class _InstagramBrowserScreenState
                     claim: headers['X-IG-WWW-Claim']
                   });
                   if (reelsRes.status === 429) {
+                    noteRateLimited();
                     return { rateLimited: true, status: 429, attempts: attempts };
                   }
                   if (reelsRes.status === 401 || reelsRes.status === 403) {
@@ -1519,6 +1678,63 @@ class _InstagramBrowserScreenState
                 } catch (e) {
                   attempts.push({ step: 'get', url: url, error: String(e) });
                 }
+              }
+            }
+
+            // 2.5) Every reel_ids lookup above came back empty (200/400, never
+            // a real payload) even though the story is visibly playing on
+            // screen — the usual cause is a WRONG numeric id: `id` above came
+            // from best-effort regex scraping of arbitrary <script> tags on
+            // the page (there is no cache hit and no real profile lookup was
+            // ever attempted), and a nearby unrelated id/username pair (e.g.
+            // a suggested-accounts widget) can be picked up by mistake. Only
+            // web_profile_info actually ties an id to a username server-side,
+            // so use it once, here, as a last resort before giving up — never
+            // upfront, to avoid tripping IG's rate limit on every tap.
+            if (!items.length && !cachedUserId) {
+              try {
+                const profRes = await fetch(
+                  'https://www.instagram.com/api/v1/users/web_profile_info/?username=' +
+                    encodeURIComponent(username),
+                  { credentials: 'include', headers: headers }
+                );
+                noteClaim(profRes);
+                attempts.push({ step: 'web_profile_info', status: profRes.status });
+                if (profRes.status === 429) {
+                  noteRateLimited();
+                  return { rateLimited: true, status: 429, attempts: attempts };
+                }
+                if (profRes.ok) {
+                  const profJson = await profRes.json();
+                  const confirmedId = profJson && profJson.data && profJson.data.user &&
+                    profJson.data.user.id;
+                  if (confirmedId && String(confirmedId) !== String(id)) {
+                    id = String(confirmedId);
+                    attempts.push({ step: 'profile_corrected', id: id });
+                    const retryRes = await fetch(
+                      'https://www.instagram.com/api/v1/feed/reels_media/?reel_ids=' +
+                        encodeURIComponent(id),
+                      { credentials: 'include', headers: headers }
+                    );
+                    noteClaim(retryRes);
+                    attempts.push({ step: 'get_retry', status: retryRes.status });
+                    if (retryRes.status === 429) {
+                      noteRateLimited();
+                      return { rateLimited: true, status: 429, attempts: attempts };
+                    }
+                    if (retryRes.ok) {
+                      const retryText = await retryRes.text();
+                      try {
+                        items = slimFromPayload(JSON.parse(retryText));
+                        attempts[attempts.length - 1].items = items.length;
+                      } catch (e) {
+                        attempts[attempts.length - 1].error = 'not_json';
+                      }
+                    }
+                  }
+                }
+              } catch (e) {
+                attempts.push({ step: 'web_profile_info', error: String(e) });
               }
             }
 
@@ -1558,6 +1774,8 @@ class _InstagramBrowserScreenState
       if (decoded is! Map) {
         _lastTrayDebug =
             'raw error=${result?.error} valueType=${decoded.runtimeType}';
+        _lastTrayUserMessage =
+            'Something went wrong loading this story\'s slides.';
         print('[Browser] tray raw error=${result?.error} value=$decoded');
         return null;
       }
@@ -1566,11 +1784,15 @@ class _InstagramBrowserScreenState
         _lastTrayDebug = 'requiresLogin status=${decoded['status']} '
             'attempts=${decoded['attempts']}';
         print('[Browser] tray requiresLogin $_lastTrayDebug');
+        _trayFailureAlreadyExplained = true;
         if (mounted) {
           setState(() => _loggedIn = false);
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
-              content: Text('Session expired. Please log in again.'),
+              content: Text(
+                'Your Instagram session expired. Log in again to keep downloading stories.',
+              ),
+              duration: Duration(seconds: 5),
             ),
           );
         }
@@ -1578,16 +1800,21 @@ class _InstagramBrowserScreenState
       }
 
       if (decoded['rateLimited'] == true) {
+        final onCooldown = decoded['cooldown'] == true;
         _lastTrayDebug =
-            'rateLimited status=${decoded['status']} attempts=${decoded['attempts']}';
+            'rateLimited cooldown=$onCooldown status=${decoded['status']} '
+            'attempts=${decoded['attempts']}';
         print('[Browser] tray $_lastTrayDebug');
+        _trayFailureAlreadyExplained = true;
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
+            SnackBar(
               content: Text(
-                'Instagram is rate-limiting requests. Wait a minute before trying again.',
+                onCooldown
+                    ? 'Instagram rate-limited this session recently. Waiting it out — try again in a minute or two.'
+                    : 'Instagram is rate-limiting requests. Wait a minute before trying again.',
               ),
-              duration: Duration(seconds: 5),
+              duration: const Duration(seconds: 5),
             ),
           );
         }
@@ -1598,6 +1825,7 @@ class _InstagramBrowserScreenState
         _lastTrayDebug =
             'no_user_id attempts=${decoded['attempts']} hint=${decoded['hint']}';
         print('[Browser] tray $_lastTrayDebug');
+        _trayFailureAlreadyExplained = true;
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
@@ -1621,6 +1849,9 @@ class _InstagramBrowserScreenState
         _lastTrayDebug =
             'error=${decoded['error']} attempts=${decoded['attempts']}';
         print('[Browser] tray not ok: $_lastTrayDebug');
+        _lastTrayUserMessage = decoded['error']?.toString() == 'no_reels'
+            ? 'Couldn\'t load this story\'s other slides right now.'
+            : 'Couldn\'t fully load this story right now.';
         return null;
       }
 
@@ -1632,6 +1863,7 @@ class _InstagramBrowserScreenState
       final rawItems = decoded['items'];
       if (rawItems is! List || rawItems.isEmpty) {
         _lastTrayDebug = '$_lastTrayDebug itemsEmpty';
+        _lastTrayUserMessage = 'Couldn\'t load this story\'s other slides right now.';
         print('[Browser] tray items empty after ok');
         return null;
       }
@@ -1684,6 +1916,40 @@ class _InstagramBrowserScreenState
       final result = await controller.callAsyncJavaScript(functionBody: r'''
         const out = [];
         const seen = {};
+
+        // A leftover <video>/<img> from the PREVIOUS story can still sit in
+        // the DOM (mid fade-out, or simply not yet unmounted) with a large
+        // bounding rect — a plain querySelectorAll has no way to tell it
+        // apart from the one actually on screen right now. Reject anything
+        // that isn't actually painted: hidden, transparent, or fully off the
+        // visible viewport.
+        function isVisible(el) {
+          try {
+            var cs = window.getComputedStyle(el);
+            if (!cs || cs.display === 'none' || cs.visibility === 'hidden') return false;
+            if (parseFloat(cs.opacity || '1') < 0.5) return false;
+            var r = el.getBoundingClientRect();
+            if (r.bottom <= 0 || r.right <= 0) return false;
+            if (r.top >= (window.innerHeight || 0) || r.left >= (window.innerWidth || 0)) return false;
+            return true;
+          } catch (e) { return true; }
+        }
+
+        // Strongest signal of all: whatever element is actually painted on
+        // top at the center of the screen right now.
+        var centerEl = null;
+        try {
+          centerEl = document.elementFromPoint(
+            (window.innerWidth || 0) / 2,
+            (window.innerHeight || 0) / 2
+          );
+        } catch (e) {}
+        function isOnTopAtCenter(el) {
+          if (!centerEl) return false;
+          return centerEl === el || (el.contains && el.contains(centerEl)) ||
+            (centerEl.contains && centerEl.contains(el));
+        }
+
         function add(url, type, score) {
           if (!url || typeof url !== 'string') return;
           if (url.indexOf('blob:') === 0) return;
@@ -1699,6 +1965,7 @@ class _InstagramBrowserScreenState
         }
 
         document.querySelectorAll('video').forEach(function(v) {
+          if (!isVisible(v)) return;
           var r = v.getBoundingClientRect();
           var area = Math.max(0, r.width) * Math.max(0, r.height);
           if (area < 25000 && r.width < 120) return;
@@ -1709,16 +1976,19 @@ class _InstagramBrowserScreenState
           if (!media) return;
           if (seen[media]) return;
           seen[media] = true;
+          var score = area + 2000000;
+          if (isOnTopAtCenter(v)) score += 10000000;
           out.push({
             url: media,
             type: 'video',
             poster: poster,
-            score: area + 2000000
+            score: score
           });
         });
 
         // Letterboxed landscape stories often have height < 240 — use area.
         document.querySelectorAll('img').forEach(function(img) {
+          if (!isVisible(img)) return;
           var r = img.getBoundingClientRect();
           var dw = r.width || 0;
           var dh = r.height || 0;
@@ -1728,6 +1998,7 @@ class _InstagramBrowserScreenState
           var score = area;
           if (area > 80000) score += 500000;
           if (dw >= 280) score += 200000;
+          if (isOnTopAtCenter(img)) score += 10000000;
           add(img.currentSrc || img.src || '', 'image', score);
           var ss = img.getAttribute('srcset') || '';
           if (ss) {
@@ -1738,12 +2009,13 @@ class _InstagramBrowserScreenState
         });
 
         document.querySelectorAll('[style*="background"]').forEach(function(el) {
+          if (!isVisible(el)) return;
           var r = el.getBoundingClientRect();
           var area = r.width * r.height;
           if (area < 35000) return;
           var st = el.getAttribute('style') || '';
           var m = st.match(/url\(["']?(https[^"')]+)["']?\)/i);
-          if (m) add(m[1], 'image', area);
+          if (m) add(m[1], 'image', area + (isOnTopAtCenter(el) ? 10000000 : 0));
         });
 
         // Hooked media from this story session
@@ -1861,15 +2133,19 @@ class _InstagramBrowserScreenState
     }
   }
 
-  /// True only when the reel wrapper explicitly identifies [want] as its
-  /// owner. Used to drop other users' reels out of a multi-user tray payload.
+  /// False only on a CONFIRMED mismatch. Verify whenever the reel actually
+  /// names an owner — even a single-reel payload can be for the wrong
+  /// account (its id can come from a fragile page-scrape guess that
+  /// resolved to a different user entirely), so this must not be skipped
+  /// just because there's only one reel to look at. A reel with no user
+  /// info at all is unverifiable and passes through unchanged.
   bool _reelBelongsToUser(Map reel, String want) {
     final user = reel['user'];
     if (user is Map) {
       final uname = user['username']?.toString();
       if (uname != null) return uname.toLowerCase() == want;
     }
-    return false;
+    return true;
   }
 
   List<StoryTrayItem> _parseTrayItems(dynamic data, {String? forUsername}) {
@@ -1970,10 +2246,9 @@ class _InstagramBrowserScreenState
       // `items`, or another user's slides bleed into this user's sheet.
       final reelsMedia = map['reels_media'];
       if (reelsMedia is List) {
-        final requireUserMatch = want != null && reelsMedia.length > 1;
         for (final reel in reelsMedia) {
           if (reel is Map) {
-            if (requireUserMatch && !_reelBelongsToUser(reel, want)) continue;
+            if (want != null && !_reelBelongsToUser(reel, want)) continue;
             final list = reel['items'];
             if (list is List) {
               for (final n in list) {
@@ -1992,10 +2267,9 @@ class _InstagramBrowserScreenState
 
       final reels = map['reels'];
       if (reels is Map) {
-        final requireUserMatch = want != null && reels.length > 1;
         for (final reel in reels.values) {
           if (reel is Map) {
-            if (requireUserMatch && !_reelBelongsToUser(reel, want)) continue;
+            if (want != null && !_reelBelongsToUser(reel, want)) continue;
             final list = reel['items'];
             if (list is List) {
               for (final n in list) {
@@ -2013,7 +2287,7 @@ class _InstagramBrowserScreenState
       }
 
       final reel = map['reel'];
-      if (reel is Map) {
+      if (reel is Map && (want == null || _reelBelongsToUser(reel, want))) {
         final list = reel['items'];
         if (list is List) {
           for (final n in list) {
@@ -2318,7 +2592,7 @@ class _InstagramBrowserScreenState
                     ),
                     const SizedBox(height: 8),
                     Text(
-                      'We never store your Instagram password.',
+                      'We never store your Instagram username or password — login is only in this web view.',
                       style: GoogleFonts.poppins(
                         color: AppColors.textMuted,
                         fontSize: 11,
@@ -2352,101 +2626,112 @@ class _InstagramBrowserScreenState
     }
 
     var ok = 0;
+    var failed = 0;
+    String? lastError;
     try {
       for (var i = 0; i < items.length; i++) {
         final item = items[i];
         progressNotifier.value = null;
-
-        final isVideo = item.isVideo;
-        final fileName = _downloadService.buildFileName(
-          prefix: 'instasave_${username}_story',
-          ext: isVideo ? 'mp4' : 'jpg',
-          index: i + 1,
-        );
-        final saveType =
-            isVideo ? MediaSaveType.video : MediaSaveType.image;
-
-        DownloadResult result;
-        final cleanUrl = item.mediaUrl.replaceAll('&amp;', '&');
         messageNotifier.value = 'Saving ${i + 1}/${items.length}…';
 
-        // Signed CDN: prefer plain GET with Referer (cookies often cause 403).
-        final bytes = await _downloadCdnBytes(cleanUrl);
-        if (bytes != null && bytes.isNotEmpty) {
-          if (saveType == MediaSaveType.video &&
-              !InstagramCdnUtils.looksLikeMp4(bytes)) {
-            if (InstagramCdnUtils.looksLikeJpeg(bytes)) {
+        // Each item is isolated: one bad slide (a stale/expired CDN url, a
+        // truncated video) must not sink the rest of the selection — a user
+        // who picked 10 slides expects the other 9 to still save.
+        try {
+          final isVideo = item.isVideo;
+          final fileName = _downloadService.buildFileName(
+            prefix: 'instasave_${username}_story',
+            ext: isVideo ? 'mp4' : 'jpg',
+            index: i + 1,
+          );
+          final saveType =
+              isVideo ? MediaSaveType.video : MediaSaveType.image;
+
+          DownloadResult result;
+          final cleanUrl = item.mediaUrl.replaceAll('&amp;', '&');
+
+          // Signed CDN: prefer plain GET with Referer (cookies often cause 403).
+          final bytes = await _downloadCdnBytes(cleanUrl);
+          if (bytes != null && bytes.isNotEmpty) {
+            if (saveType == MediaSaveType.video &&
+                !InstagramCdnUtils.looksLikeMp4(bytes)) {
+              if (InstagramCdnUtils.looksLikeJpeg(bytes)) {
+                result = await _downloadService.saveBytes(
+                  bytes: bytes,
+                  fileName: _downloadService.buildFileName(
+                    prefix: 'instasave_${username}_story',
+                    ext: 'jpg',
+                    index: i + 1,
+                  ),
+                  saveType: MediaSaveType.image,
+                );
+              } else {
+                throw Exception(
+                  'Downloaded file is not a playable video. Try again.',
+                );
+              }
+            } else {
               result = await _downloadService.saveBytes(
                 bytes: bytes,
-                fileName: _downloadService.buildFileName(
-                  prefix: 'instasave_${username}_story',
-                  ext: 'jpg',
-                  index: i + 1,
-                ),
-                saveType: MediaSaveType.image,
-              );
-            } else {
-              throw Exception(
-                'Downloaded file is not a playable video. Try again.',
+                fileName: fileName,
+                saveType: saveType,
               );
             }
           } else {
-            result = await _downloadService.saveBytes(
-              bytes: bytes,
+            result = await _downloadService.downloadAndSave(
+              url: cleanUrl,
               fileName: fileName,
               saveType: saveType,
+              extraHeaders: {
+                'Referer': (_pageUrl != null && _pageUrl!.startsWith('http'))
+                    ? _pageUrl!
+                    : 'https://www.instagram.com/',
+              },
+              onProgress: (p) => progressNotifier.value = p,
             );
           }
-        } else {
-          result = await _downloadService.downloadAndSave(
-            url: cleanUrl,
-            fileName: fileName,
-            saveType: saveType,
-            extraHeaders: {
-              'Referer': (_pageUrl != null && _pageUrl!.startsWith('http'))
-                  ? _pageUrl!
-                  : 'https://www.instagram.com/',
-            },
-            onProgress: (p) => progressNotifier.value = p,
+
+          final history = DownloadItem(
+            id: '${DateTime.now().millisecondsSinceEpoch}_$i',
+            fileName: result.savedPath.split('/').last,
+            localPath: result.savedPath,
+            thumbnailUrl: item.thumbnailUrl ?? item.mediaUrl,
+            sourceUrl: _pageUrl ?? _startUrl,
+            type: isVideo ? DownloadMediaType.video : DownloadMediaType.photo,
+            quality: 'HD',
+            fileSizeBytes: result.fileSizeBytes,
+            downloadedAt: DateTime.now(),
+            author: username,
+            title: 'Instagram Story',
           );
+          await ref.read(downloadHistoryProvider.notifier).add(history);
+          ok++;
+        } catch (e) {
+          failed++;
+          lastError = e.toString().replaceFirst('Exception: ', '');
+          if (kDebugMode) {
+            debugPrint('[Browser] story item $i download failed: $e');
+          }
         }
-
-        final history = DownloadItem(
-          id: '${DateTime.now().millisecondsSinceEpoch}_$i',
-          fileName: result.savedPath.split('/').last,
-          localPath: result.savedPath,
-          thumbnailUrl: item.thumbnailUrl ?? item.mediaUrl,
-          sourceUrl: _pageUrl ?? _startUrl,
-          type: isVideo ? DownloadMediaType.video : DownloadMediaType.photo,
-          quality: 'HD',
-          fileSizeBytes: result.fileSizeBytes,
-          downloadedAt: DateTime.now(),
-          author: username,
-          title: 'Instagram Story',
-        );
-        await ref.read(downloadHistoryProvider.notifier).add(history);
-        ok++;
       }
 
       if (mounted) {
         Navigator.of(context, rootNavigator: true).pop();
+        final blocked = lastError != null &&
+            (lastError.contains('blocked') || lastError.contains('403'));
+        final String message;
+        if (failed == 0) {
+          message = 'Saved $ok story item(s) to gallery';
+        } else if (ok == 0) {
+          message = blocked
+              ? 'Instagram blocked the download. Stay logged in and try again.'
+              : 'Download failed: ${lastError ?? 'unknown error'}';
+        } else {
+          message = 'Saved $ok of ${items.length} — $failed failed'
+              '${blocked ? ' (Instagram may be blocking some requests)' : ''}';
+        }
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Saved $ok story item(s) to gallery')),
-        );
-      }
-    } catch (e) {
-      if (mounted) {
-        Navigator.of(context, rootNavigator: true).pop();
-        final msg = e.toString().replaceFirst('Exception: ', '');
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              msg.contains('blocked') || msg.contains('403')
-                  ? 'Instagram blocked the download. Stay logged in and try again.'
-                  : 'Download failed: $msg',
-            ),
-            duration: const Duration(seconds: 5),
-          ),
+          SnackBar(content: Text(message), duration: const Duration(seconds: 5)),
         );
       }
     } finally {
@@ -2544,8 +2829,9 @@ class _InstagramBrowserScreenState
                 await prefs.setBool(_prefsWhyLoginKey, false);
                 await _maybeShowWhyLogin();
               },
+              onLogout: _logout,
             ),
-            if (_showTipBanner)
+            if (_showTipBanner && !_hideBrowserForAutoFetch)
               _TipBanner(
                 onHowTo: () {
                   setState(() => _showTipBanner = false);
@@ -2706,6 +2992,40 @@ class _InstagramBrowserScreenState
                         ),
                       ),
                     ),
+                  // Covers Instagram's own page while it loads in the
+                  // background for a pasted story link — the WebView still
+                  // needs to run underneath for its cookies/network activity,
+                  // the user just isn't shown Instagram's UI flashing by
+                  // before the download sheet opens on its own.
+                  if (_hideBrowserForAutoFetch)
+                    Positioned.fill(
+                      child: ColoredBox(
+                        color: AppColors.darkBackground,
+                        child: Center(
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const SizedBox(
+                                width: 40,
+                                height: 40,
+                                child: CircularProgressIndicator(
+                                  color: AppColors.accent,
+                                  strokeWidth: 3,
+                                ),
+                              ),
+                              const SizedBox(height: 16),
+                              Text(
+                                'Loading story…',
+                                style: GoogleFonts.poppins(
+                                  color: AppColors.textSecondary,
+                                  fontSize: 13,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
                 ],
               ),
             ),
@@ -2728,6 +3048,7 @@ class _BrowserChrome extends StatelessWidget {
     required this.onHome,
     required this.onSubmitUrl,
     required this.onWhyLogin,
+    required this.onLogout,
   });
 
   final TextEditingController urlController;
@@ -2740,6 +3061,7 @@ class _BrowserChrome extends StatelessWidget {
   final VoidCallback onHome;
   final ValueChanged<String> onSubmitUrl;
   final VoidCallback onWhyLogin;
+  final VoidCallback onLogout;
 
   @override
   Widget build(BuildContext context) {
@@ -2803,6 +3125,7 @@ class _BrowserChrome extends StatelessWidget {
             onSelected: (v) {
               if (v == 'why') onWhyLogin();
               if (v == 'home') onHome();
+              if (v == 'logout') onLogout();
             },
             itemBuilder: (_) => [
               PopupMenuItem(
@@ -2819,6 +3142,14 @@ class _BrowserChrome extends StatelessWidget {
                   style: GoogleFonts.poppins(color: AppColors.textPrimary),
                 ),
               ),
+              if (loggedIn)
+                PopupMenuItem(
+                  value: 'logout',
+                  child: Text(
+                    'Log out of Instagram',
+                    style: GoogleFonts.poppins(color: AppColors.error),
+                  ),
+                ),
               PopupMenuItem(
                 enabled: false,
                 child: Text(
@@ -2864,7 +3195,7 @@ class _TipBanner extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  'Tap Log in / Sign up on this page (not “Open Instagram”). After you’re logged in, open a story and tap the pink download button. We never store your password.',
+                  'Only public account stories can be saved. Paste the story link into the app each time — browsing alone isn’t enough. Log in once here on Instagram’s website (not “Open Instagram”). We never store your username or password; this is only a secure web view. Then tap the pink download button.',
                   style: GoogleFonts.poppins(
                     color: AppColors.textSecondary,
                     fontSize: 12,
@@ -2996,8 +3327,9 @@ class _WhyLoginDialog extends StatelessWidget {
             ),
             const SizedBox(height: 8),
             Text(
-              '1. Due to Instagram updates, you need to log in to download stories.\n'
-              '2. You log into Instagram’s official website. We never store your password.',
+              '1. Only stories from public accounts can be fetched.\n'
+              '2. Paste the story link into the app each time you want to download — browsing Instagram alone isn’t enough.\n'
+              '3. Log in once on Instagram’s official website inside this browser. We never store your username or password — it’s just a secure web view.',
               style: GoogleFonts.poppins(
                 color: AppColors.textSecondary,
                 fontSize: 13,
@@ -3015,9 +3347,9 @@ class _WhyLoginDialog extends StatelessWidget {
             ),
             const SizedBox(height: 8),
             Text(
-              '1. Download Posts / Reels / Stories available to your account.\n'
+              '1. Open the pasted story, then tap the pink download button.\n'
               '2. You only need to log in once — your session stays in the app browser.\n'
-              '3. You can log out anytime on Instagram.',
+              '3. You can log out anytime from the ⋮ menu.',
               style: GoogleFonts.poppins(
                 color: AppColors.textSecondary,
                 fontSize: 13,

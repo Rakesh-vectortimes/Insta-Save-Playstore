@@ -24,8 +24,9 @@ class _RollingDisclaimerState extends State<RollingDisclaimer>
   static const String _separator = '        •        ';
 
   static const _messages = [
-    'Only media from public accounts can be downloaded',
-    'For stories: Open Instagram, log in once, tap the pink download button',
+    'Couldn’t fetch? Check that the Instagram URL is valid',
+    'Stories: only public accounts — paste the story link each time',
+    'Stories need a one-time login in our browser — we never store your credentials',
     'Respect copyright — use downloads for personal use only',
   ];
 

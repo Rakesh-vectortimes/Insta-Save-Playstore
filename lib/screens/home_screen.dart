@@ -9,12 +9,10 @@ import '../core/responsive.dart';
 import '../core/url_detector.dart';
 import '../models/download_item.dart';
 import '../models/post_result.dart';
-import '../models/profile_result.dart';
 import '../models/reel_result.dart';
 import '../services/download_history_service.dart';
 import '../services/download_service.dart';
 import '../services/instagram_api_service.dart';
-import '../services/instagram_session.dart';
 import '../widgets/app_logo.dart';
 import '../widgets/content_preview_card.dart';
 import '../widgets/download_progress_dialog.dart';
@@ -25,7 +23,6 @@ import 'carousel_screen.dart';
 import 'how_to_download_screen.dart';
 import 'instagram_browser_screen.dart';
 import 'privacy_policy_screen.dart';
-import 'profile_pic_screen.dart';
 import 'terms_of_use_screen.dart';
 
 class HomeScreen extends ConsumerStatefulWidget {
@@ -38,26 +35,19 @@ class HomeScreen extends ConsumerStatefulWidget {
 class _HomeScreenState extends ConsumerState<HomeScreen>
     with WidgetsBindingObserver {
   final _urlController = TextEditingController();
-  final _usernameController = TextEditingController();
   final _downloadService = DownloadService();
   final _previewScrollController = ScrollController();
 
   bool _isFetching = false;
   bool _isSaving = false;
-  bool _isProfileLoading = false;
-  bool _isProfileSaving = false;
   String? _errorMessage;
-  String? _profileErrorMessage;
   bool _scopeLimited = false;
   bool _retryable = false;
-  bool _profileScopeLimited = false;
-  bool _profileRetryable = false;
   String? _statusMessage;
 
   String? _sourceUrl;
   ReelResult? _reel;
   PostResult? _post;
-  ProfileResult? _profile;
   String _selectedFormat = 'mp4';
   int _selectedQuality = 720;
   DownloadItem? _lastSavedItem;
@@ -76,7 +66,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _urlController.dispose();
-    _usernameController.dispose();
     _previewScrollController.dispose();
     super.dispose();
   }
@@ -149,27 +138,26 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
 
     try {
       if (detection.type == InstagramUrlType.profile) {
-        final username = UrlDetector.sanitizeUsername(
-          detection.normalizedUrl!,
-        );
         setState(() {
           _isFetching = false;
           _statusMessage = null;
-          if (username.isNotEmpty) {
-            _usernameController.text = username;
-          }
+          _errorMessage =
+              'Profile picture download isn’t available. Paste a reel, post, or story link instead.';
+          _retryable = false;
+          _scopeLimited = false;
         });
-        await _fetchProfilePicture();
         return;
       }
 
       if (detection.type == InstagramUrlType.story) {
-        // Stories: open built-in Instagram browser (no login prompt).
+        // Stories: open built-in Instagram browser after disclaimer.
         setState(() {
           _isFetching = false;
           _statusMessage = null;
           _errorMessage = null;
         });
+        final proceed = await _confirmStoryDisclaimer();
+        if (!proceed || !mounted) return;
         await _openInstagramBrowser(
           initialUrl: detection.normalizedUrl!,
         );
@@ -213,20 +201,81 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
       }
     } on ApiException catch (e) {
       setState(() {
-        _errorMessage = e.message;
+        _errorMessage = _friendlyFetchError(e);
         _scopeLimited = e.scopeLimited;
         _retryable = e.retryable;
         _statusMessage = null;
       });
     } catch (_) {
       setState(() {
-        _errorMessage = 'Something went wrong. Please try again.';
+        _errorMessage = AppConstants.invalidUrlMessage;
         _retryable = true;
         _statusMessage = null;
       });
     } finally {
       if (mounted) setState(() => _isFetching = false);
     }
+  }
+
+  String _friendlyFetchError(ApiException e) {
+    final lower = e.message.toLowerCase();
+    if (e.scopeLimited ||
+        lower.contains('private') ||
+        lower.contains('restricted')) {
+      return e.message;
+    }
+    if (lower.contains('too many') ||
+        lower.contains('wait') ||
+        lower.contains('internet') ||
+        lower.contains('connection')) {
+      return e.message;
+    }
+    // Most fetch failures are a bad/expired/unsupported link.
+    return AppConstants.invalidUrlMessage;
+  }
+
+  Future<bool> _confirmStoryDisclaimer() async {
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.darkSurface,
+        title: Text(
+          AppConstants.storyDisclaimerTitle,
+          style: GoogleFonts.poppins(
+            color: AppColors.textPrimary,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        content: Text(
+          AppConstants.storyDisclaimerBody,
+          style: GoogleFonts.poppins(
+            color: AppColors.textSecondary,
+            fontSize: 13,
+            height: 1.45,
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: Text(
+              'Cancel',
+              style: GoogleFonts.poppins(color: AppColors.textMuted),
+            ),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text(
+              'Continue',
+              style: GoogleFonts.poppins(
+                color: AppColors.accent,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+    return result == true;
   }
 
   Future<void> _openInstagramBrowser({String? initialUrl}) async {
@@ -359,241 +408,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
     }
   }
 
-  Future<void> _fetchProfilePicture() async {
-    final username = UrlDetector.sanitizeUsername(_usernameController.text);
-    if (username.isEmpty) {
-      setState(() {
-        _profileErrorMessage =
-            'Enter an Instagram username (e.g. cristiano), without spaces.';
-        _profileRetryable = false;
-      });
-      return;
-    }
-    if (!UrlDetector.isValidUsername(username)) {
-      setState(() {
-        _profileErrorMessage =
-            'Invalid username. Use letters, numbers, periods or underscores only.';
-        _profileRetryable = false;
-        _profile = null;
-      });
-      return;
-    }
-
-    // Reflect sanitized username in the field so testers see what was sent.
-    if (_usernameController.text.trim() != username) {
-      _usernameController.text = username;
-    }
-
-    setState(() {
-      _isProfileLoading = true;
-      _profileErrorMessage = null;
-      _profileScopeLimited = false;
-      _profileRetryable = false;
-      _profile = null;
-    });
-
-    try {
-      final api = ref.read(instagramApiServiceProvider);
-      final profile = await api.fetchProfilePicture(username);
-      setState(() => _profile = profile);
-    } on ApiException catch (e) {
-      setState(() {
-        _profileErrorMessage = e.message;
-        _profileScopeLimited = e.scopeLimited;
-        _profileRetryable = e.retryable;
-      });
-    } catch (_) {
-      setState(() {
-        _profileErrorMessage =
-            'Unable to retrieve the profile picture. Please check the username and try again.';
-        _profileRetryable = true;
-      });
-    } finally {
-      if (mounted) setState(() => _isProfileLoading = false);
-    }
-  }
-
-  Future<void> _saveProfilePicture() async {
-    if (_profile == null || _profile!.username.isEmpty) return;
-
-    if (_profile!.lowQuality) {
-      // Don't tell an already-logged-in user to "log in" again — that button
-      // does nothing for them and just loops back to the same dialog. Only
-      // offer the login path when there's genuinely no Instagram session yet.
-      final alreadyLoggedIn = await InstagramSession.hasSession();
-      if (!mounted) return;
-      final choice = await showDialog<String>(
-        context: context,
-        builder: (ctx) => AlertDialog(
-          backgroundColor: AppColors.darkSurface,
-          title: Text(
-            alreadyLoggedIn
-                ? 'Only a soft thumbnail available'
-                : 'Sharp DP needs login',
-            style: GoogleFonts.poppins(
-              color: AppColors.textPrimary,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-          content: Text(
-            alreadyLoggedIn
-                ? 'You’re logged in, but Instagram isn’t sharing a sharper image for this account. Soft enhance will still look soft.'
-                : 'Instagram only shared a tiny thumbnail. Soft enhance will still look soft.\n\n'
-                    'For the real sharp DP: Open Instagram → Log in → come back and search this username again.',
-            style: GoogleFonts.poppins(
-              color: AppColors.textSecondary,
-              fontSize: 13,
-              height: 1.4,
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx, 'enhance'),
-              child: Text(
-                'Enhance anyway',
-                style: GoogleFonts.poppins(color: AppColors.textMuted),
-              ),
-            ),
-            if (!alreadyLoggedIn)
-              TextButton(
-                onPressed: () => Navigator.pop(ctx, 'login'),
-                child: Text(
-                  'Log in for sharp DP',
-                  style: GoogleFonts.poppins(
-                    color: AppColors.accent,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ),
-          ],
-        ),
-      );
-      if (!mounted) return;
-      if (choice == null) return;
-      if (choice == 'login') {
-        await _openInstagramBrowser(
-          initialUrl: 'https://www.instagram.com/accounts/login/',
-        );
-        if (!mounted) return;
-        // After returning from browser, re-fetch with session and save if sharper.
-        final username = _profile!.username;
-        _usernameController.text = username;
-        await _fetchProfilePicture();
-        if (!mounted || _profile == null) return;
-        if (!_profile!.lowQuality) {
-          await _saveProfilePictureSkippingPrompt();
-        } else {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text(
-                'Still low-res after login. Tap Save → Enhance anyway, or confirm you’re logged in (home feed visible).',
-              ),
-              duration: Duration(seconds: 5),
-            ),
-          );
-        }
-        return;
-      }
-    }
-
-    await _saveProfilePictureSkippingPrompt();
-  }
-
-  Future<void> _saveProfilePictureSkippingPrompt() async {
-    if (_profile == null || _profile!.username.isEmpty) return;
-
-    setState(() => _isProfileSaving = true);
-    final progressNotifier = ValueNotifier<FileDownloadProgress?>(null);
-    final progressMessage = _profile!.lowQuality
-        ? 'Enhancing thumbnail (won’t look like real HD)...'
-        : 'Downloading profile picture...';
-
-    if (mounted) {
-      DownloadProgressDialog.show(
-        context,
-        progressNotifier: progressNotifier,
-        message: progressMessage,
-      );
-    }
-
-    try {
-      final api = ref.read(instagramApiServiceProvider);
-      final download = await api.downloadProfilePicture(
-        _profile!.username,
-        upscale: _profile!.upscaleAvailable || _profile!.lowQuality
-            ? true
-            : null,
-        directUrl: _profile!.dpUrl,
-        preferDirect: (_profile!.source == 'webview_hd' ||
-                _profile!.source == 'session_hd') &&
-            !_profile!.lowQuality &&
-            !_profile!.upscaleAvailable &&
-            (_profile!.dpSize == null || _profile!.dpSize! >= 640),
-        onProgress: (p) => progressNotifier.value = p,
-      );
-
-      final fileName = _downloadService.buildFileName(
-        prefix:
-            'instasave_${_profile!.username}_dp${download.wasUpscaled ? '_enhanced' : ''}',
-        ext: 'jpg',
-      );
-      final result = await _downloadService.saveBytes(
-        bytes: download.bytes,
-        fileName: fileName,
-        saveType: MediaSaveType.image,
-      );
-
-      final historyItem = DownloadItem(
-        id: DateTime.now().millisecondsSinceEpoch.toString(),
-        fileName: result.savedPath.split('/').last,
-        localPath: result.savedPath,
-        thumbnailUrl: _profile!.dpUrl,
-        sourceUrl: 'https://www.instagram.com/${_profile!.username}/',
-        type: DownloadMediaType.photo,
-        quality: download.wasUpscaled
-            ? 'Enhanced'
-            : (_profile!.lowQuality ? 'Low' : 'HD'),
-        fileSizeBytes: result.fileSizeBytes,
-        downloadedAt: DateTime.now(),
-        author: _profile!.username,
-        title: _profile!.fullName.isNotEmpty
-            ? _profile!.fullName
-            : _profile!.username,
-      );
-      await ref.read(downloadHistoryProvider.notifier).add(historyItem);
-
-      if (mounted) {
-        Navigator.of(context).pop();
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              download.wasUpscaled
-                  ? 'Enhanced thumbnail saved (soft). Log in for sharp DP.'
-                  : 'Profile picture saved!',
-            ),
-          ),
-        );
-      }
-    } on ApiException catch (e) {
-      if (mounted) {
-        Navigator.of(context).pop();
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(e.message)),
-        );
-      }
-    } catch (e) {
-      if (mounted) {
-        Navigator.of(context).pop();
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(e.toString().replaceFirst('Exception: ', ''))),
-        );
-      }
-    } finally {
-      progressNotifier.dispose();
-      if (mounted) setState(() => _isProfileSaving = false);
-    }
-  }
-
   String get _thumbnailUrl {
     if (_reel != null) return _reel!.thumbnail ?? '';
     if (_post != null) return _post!.thumbnail ?? _post!.url ?? '';
@@ -682,20 +496,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                           },
                         ),
                         ListTile(
-                          leading: const Icon(Icons.account_circle_outlined,
-                              color: AppColors.textPrimary),
-                          title: Text('Profile picture',
-                              style: GoogleFonts.poppins(color: AppColors.textPrimary)),
-                          onTap: () {
-                            Navigator.pop(ctx);
-                            Navigator.of(context).push(
-                              MaterialPageRoute(
-                                builder: (_) => const ProfilePicScreen(),
-                              ),
-                            );
-                          },
-                        ),
-                        ListTile(
                           leading: const Icon(Icons.help_outline,
                               color: AppColors.textPrimary),
                           title: Text('How to download',
@@ -737,50 +537,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                   children: [
             const RollingDisclaimer(),
             Padding(
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 6),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: OutlinedButton.icon(
-                      onPressed: () => _openInstagramBrowser(),
-                      icon: const Icon(Icons.open_in_browser, size: 18),
-                      label: Text(
-                        'Open Instagram',
-                        style: GoogleFonts.poppins(
-                          fontSize: 13,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                      style: OutlinedButton.styleFrom(
-                        foregroundColor: AppColors.textPrimary,
-                        side: const BorderSide(color: AppColors.darkBorder),
-                        padding: const EdgeInsets.symmetric(vertical: 12),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  TextButton.icon(
-                    onPressed: _openHowToDownload,
-                    icon: const Icon(Icons.help_outline, size: 16),
-                    label: Text(
-                      'How to?',
-                      style: GoogleFonts.poppins(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w500,
-                      ),
-                    ),
-                    style: TextButton.styleFrom(
-                      foregroundColor: AppColors.accent,
-                      padding: const EdgeInsets.symmetric(horizontal: 8),
-                      minimumSize: const Size(0, 32),
-                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
               child: Row(
                 children: [
                   Expanded(
@@ -831,68 +588,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                             ),
                           )
                         : Text(
-                            'Get Video',
-                            style: GoogleFonts.poppins(fontWeight: FontWeight.w600),
-                          ),
-                  ),
-                ],
-              ),
-            ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: Container(
-                      height: 48,
-                      decoration: BoxDecoration(
-                        color: AppColors.darkInput,
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: TextField(
-                        controller: _usernameController,
-                        style: GoogleFonts.poppins(
-                          color: AppColors.textPrimary,
-                          fontSize: 14,
-                        ),
-                        decoration: InputDecoration(
-                          hintText: 'Enter username (e.g. cristiano)',
-                          hintStyle: GoogleFonts.poppins(
-                            color: AppColors.textMuted,
-                            fontSize: 14,
-                          ),
-                          border: InputBorder.none,
-                          contentPadding:
-                              const EdgeInsets.symmetric(horizontal: 16),
-                        ),
-                        onSubmitted: (_) => _fetchProfilePicture(),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  TextButton(
-                    onPressed: (_isProfileLoading || _isProfileSaving)
-                        ? null
-                        : _fetchProfilePicture,
-                    style: TextButton.styleFrom(
-                      backgroundColor: AppColors.darkCard,
-                      foregroundColor: AppColors.accent,
-                      padding: const EdgeInsets.symmetric(horizontal: 16),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                    ),
-                    child: _isProfileLoading
-                        ? const SizedBox(
-                            width: 18,
-                            height: 18,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                              color: AppColors.accent,
-                            ),
-                          )
-                        : Text(
-                            'Get DP',
+                            'Download',
                             style: GoogleFonts.poppins(fontWeight: FontWeight.w600),
                           ),
                   ),
@@ -907,115 +603,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                   scopeLimited: _scopeLimited,
                   retryable: _retryable,
                   onRetry: _fetchContent,
-                ),
-              ),
-            if (_profileErrorMessage != null)
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                child: ErrorBanner(
-                  message: _profileErrorMessage!,
-                  scopeLimited: _profileScopeLimited,
-                  retryable: _profileRetryable,
-                  onRetry: _fetchProfilePicture,
-                ),
-              ),
-            if (_profile != null)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
-                child: Container(
-                  decoration: BoxDecoration(
-                    color: AppColors.darkSurface,
-                    borderRadius: BorderRadius.circular(14),
-                    border: Border.all(color: AppColors.darkBorder),
-                  ),
-                  child: Padding(
-                    padding: const EdgeInsets.all(12),
-                    child: Row(
-                      children: [
-                        CircleAvatar(
-                          radius: 26,
-                          backgroundColor: AppColors.darkCard,
-                          backgroundImage: NetworkImage(_profile!.dpUrl),
-                          onBackgroundImageError: (_, __) {},
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                '@${_profile!.username}',
-                                style: GoogleFonts.poppins(
-                                  color: AppColors.textPrimary,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                              const SizedBox(height: 2),
-                              Text(
-                                _profile!.fullName.isNotEmpty
-                                    ? _profile!.fullName
-                                    : 'Profile picture ready',
-                                style: GoogleFonts.poppins(
-                                  color: AppColors.textSecondary,
-                                  fontSize: 12,
-                                ),
-                              ),
-                              if (_profile!.source != null) ...[
-                                const SizedBox(height: 2),
-                                Text(
-                                  _profile!.source == 'webview_hd'
-                                      ? 'HD from profile page'
-                                      : _profile!.source == 'webview_standard'
-                                          ? 'Standard from profile page'
-                                          : 'Source: ${_profile!.source}',
-                                  style: GoogleFonts.poppins(
-                                    color: AppColors.textMuted,
-                                    fontSize: 11,
-                                  ),
-                                ),
-                              ],
-                              if (_profile!.lowQuality) ...[
-                                const SizedBox(height: 2),
-                                Text(
-                                  'Low-res thumb — log in for sharp DP',
-                                  style: GoogleFonts.poppins(
-                                    color: AppColors.primary,
-                                    fontSize: 11,
-                                    fontWeight: FontWeight.w500,
-                                  ),
-                                ),
-                              ],
-                            ],
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        TextButton(
-                          onPressed: _isProfileSaving ? null : _saveProfilePicture,
-                          style: TextButton.styleFrom(
-                            backgroundColor: AppColors.accent,
-                            foregroundColor: Colors.white,
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(10),
-                            ),
-                          ),
-                          child: _isProfileSaving
-                              ? const SizedBox(
-                                  height: 16,
-                                  width: 16,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2,
-                                    color: Colors.white,
-                                  ),
-                                )
-                              : Text(
-                                  'Save',
-                                  style:
-                                      GoogleFonts.poppins(fontWeight: FontWeight.w600),
-                                ),
-                        ),
-                      ],
-                    ),
-                  ),
                 ),
               ),
             Expanded(
